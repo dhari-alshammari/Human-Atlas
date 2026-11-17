@@ -20,8 +20,23 @@ const initial = (sex: Sex): SceneState => ({
   reset: 0,
 });
 
+// The male model only (the male/female choice was removed at the owner's request).
+const sex: Sex = 'male';
+
+// A message from the page around the model (Bubble) that clears the highlighted part, for example when the
+// patient starts a new chat with «+». The main form is { type: 'HUMAN_ATLAS_CLEAR' }; a few simpler forms work too.
+const isClearMessage = (data: unknown): boolean => {
+  if (data === 'clear' || data === 'HUMAN_ATLAS_CLEAR') return true;
+  if (!data || typeof data !== 'object') return false;
+  const message = data as { type?: unknown; action?: unknown };
+  return (
+    message.type === 'HUMAN_ATLAS_CLEAR' ||
+    message.type === 'CLEAR_SELECTION' ||
+    message.action === 'clear'
+  );
+};
+
 export default function Home() {
-  const [sex, setSex] = useState<Sex>('male');
   const [atlas, setAtlas] = useState<Atlas | null>(null);
   const [state, setState] = useState<SceneState>(() => initial('male'));
   const [progress, setProgress] = useState(0);
@@ -46,7 +61,16 @@ export default function Home() {
       });
 
     return () => abort.abort();
-  }, [sex]);
+  }, []);
+
+  useEffect(() => {
+    const onMessage = (event: MessageEvent) => {
+      if (!isClearMessage(event.data)) return;
+      setState(current => ({ ...current, selected: [], isolate: false }));
+    };
+    window.addEventListener('message', onMessage);
+    return () => window.removeEventListener('message', onMessage);
+  }, []);
 
   const parts = useMemo(
     () => new Map(atlas?.parts.map(p => [p.id, p])),
@@ -95,29 +119,6 @@ export default function Home() {
         />
       )}
 
-      <div
-        style={{
-          position: 'absolute',
-          top: 12,
-          right: 12,
-          zIndex: 20,
-        }}
-      >
-        <select
-          value={sex}
-          onChange={event => setSex(event.target.value as Sex)}
-          aria-label="Choose body"
-          style={{
-            padding: '10px',
-            borderRadius: 8,
-            background: 'white',
-            color: '#222',
-          }}
-        >
-          <option value="male">Male - رجل</option>
-          <option value="female">Female - امرأة</option>
-        </select>
-      </div>
 
       {progress < 100 && !error && (
         <div
