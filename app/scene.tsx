@@ -20,7 +20,7 @@ export default function AnatomyScene({atlas,state,onSelect,onProgress,onError}:P
   renderer.setPixelRatio(Math.min(devicePixelRatio,innerWidth<768?1.5:2));renderer.setClearColor('#f2f3f3');renderer.outputColorSpace=T.SRGBColorSpace;renderer.toneMapping=T.ACESFilmicToneMapping;renderer.toneMappingExposure=1.12;el.appendChild(renderer.domElement);
   renderer.domElement.setAttribute('aria-label','Interactive human anatomy. Drag to orbit, pinch or scroll to zoom, and tap a structure to inspect it.');
   const scene=new T.Scene(),camera=new T.PerspectiveCamera(34,1,.005,100),controls=new OrbitControls(camera,renderer.domElement);
-  camera.position.set(1.4,1.05,3.6);controls.target.set(0,.85,0);controls.enableDamping=true;controls.dampingFactor=.085;controls.minDistance=.07;controls.maxDistance=40;controls.maxPolarAngle=Math.PI*.96;controls.addEventListener('change',()=>{dirty=true;});
+  camera.position.set(1.4,1.05,3.6);controls.target.set(0,.85,0);controls.enableDamping=true;controls.dampingFactor=.085;controls.minDistance=.12;controls.maxDistance=8;controls.maxPolarAngle=Math.PI*.8;controls.enableZoom=false;controls.addEventListener('change',()=>{dirty=true;});
   const pmrem=new T.PMREMGenerator(renderer),room=new RoomEnvironment(),env=pmrem.fromScene(room,.04);scene.environment=env.texture;room.dispose();pmrem.dispose();
   scene.add(new T.HemisphereLight(0xffffff,0xa7acb2,1.05));
   const key=new T.DirectionalLight(0xfffaf4,2.3);key.position.set(-2,4,3);scene.add(key);
@@ -58,7 +58,11 @@ export default function AnatomyScene({atlas,state,onSelect,onProgress,onError}:P
    };materials.push(m);return m;
   };
   const mats=new Map(SYSTEMS.map(s=>[s.id,materialFor(s.id)]));
-  let loaded=0;
+  // Chunks load when a visible system needs them (2026-11-17): the muscles view first; the internal organs' extra
+  // chunks only when that view is chosen. Parts, names and picking are unchanged.
+  const loadedChunks=new Set<number>(),requested=new Set<number>();let neededChunks:number[]=[];
+  const chunkSystems=atlas.chunks.map((_,ci)=>new Set(atlas.parts.filter(p=>p.chunk===ci).map(p=>p.system as string)));
+  const reportProgress=()=>{const done=neededChunks.filter(ci=>loadedChunks.has(ci)).length;onProgress(neededChunks.length?Math.round(done/neededChunks.length*100):100);ready=done===neededChunks.length&&loadedChunks.size>0;dirty=true;};
   const loadChunk=async(ci:number)=>{
    const chunk=atlas.chunks[ci],compressed=!!chunk.gzip&&typeof DecompressionStream!=='undefined';const response=await fetch(compressed?chunk.gzip!:chunk.url,{signal:abort.signal});const buffer=await decodeModelResponse(response,chunk.bytes,compressed);if(disposed)return;
    const groups=new Map<string,T.BufferGeometry[]>();
@@ -72,10 +76,24 @@ export default function AnatomyScene({atlas,state,onSelect,onProgress,onError}:P
     const list=groups.get(p.system)??[];list.push(g);groups.set(p.system,list);
    });
    groups.forEach((gs,system)=>{const geometry=mergeGeometries(gs,false);if(!geometry)throw new Error('Could not assemble anatomy geometry.');geometries.push(geometry);const mesh=new T.Mesh(geometry,mats.get(system as never));mesh.frustumCulled=false;scene.add(mesh);});
-   lastState=null;loaded++;onProgress(Math.round(loaded/atlas.chunks.length*100));dirty=true;
+   lastState=null;loadedChunks.add(ci);reportProgress();
   };
-  (async()=>{try{let cursor=0;await Promise.all(Array.from({length:3},async()=>{while(cursor<atlas.chunks.length){const i=cursor++;await loadChunk(i);}}));if(!disposed){ready=true;dirty=true;}}catch(e){if(!disposed)onError(e instanceof Error?e.message:'Could not load the anatomy.');}})();
+  const ensureChunks=(systems:string[])=>{
+   const wanted=new Set(systems);neededChunks=atlas.chunks.map((_,ci)=>ci).filter(ci=>[...chunkSystems[ci]].some(id=>wanted.has(id)));
+   const queue=neededChunks.filter(ci=>!requested.has(ci));queue.forEach(ci=>requested.add(ci));reportProgress();if(!queue.length)return;
+   (async()=>{try{let cursor=0;await Promise.all(Array.from({length:3},async()=>{while(cursor<queue.length){const i=queue[cursor++];await loadChunk(i);}}));}catch(e){if(!disposed)onError(e instanceof Error?e.message:'Could not load the anatomy.');}})();
+  };
+  let lastWanted='';
+  // The whole body, centred, below the small top bar (2026-11-17): the earlier layout reserved room for panels.
+  // The frame is the parts of the chosen view (the organs view is smaller than the whole body).
+  const bodyBox=new T.Box3(),bodyCenter=new T.Vector3(),bodySize=new T.Vector3();
+  const frameVisible=()=>{const shown=new Set<string>(latest.current.visible);bodyBox.makeEmpty();atlas.parts.forEach((p,i)=>{if(shown.has(p.system))bodyBox.union(bounds[i]);});if(bodyBox.isEmpty())bounds.forEach(b=>bodyBox.union(b));bodyBox.getCenter(bodyCenter);bodyBox.getSize(bodySize);};
   const fit=(view:string,extent=0)=>{
+   if(extent<=.1){frameVisible();const top=64,bottom=16,h=Math.max(160,el.clientHeight-top-bottom),half=Math.tan(T.MathUtils.degToRad(camera.fov/2));
+    const distance=Math.max(bodySize.y*1.06*el.clientHeight/h,bodySize.x*1.1/camera.aspect)/(2*half);
+    const direction=view==='back'?new T.Vector3(0,.02,-1):new T.Vector3(0,.02,1);
+    camera.clearViewOffset();camera.setViewOffset(el.clientWidth,el.clientHeight,0,-(top-bottom)/2,el.clientWidth,el.clientHeight);
+    controls.target.copy(bodyCenter);camera.position.copy(bodyCenter).addScaledVector(direction,distance);controls.maxDistance=distance*1.35;controls.update();dirty=true;return;}
    const aspect=camera.aspect,mobile=el.clientWidth<768,normalDistance=mobile?Math.max(4.5,1.8*el.clientHeight/Math.max(160,el.clientHeight-350)/(2*Math.tan(T.MathUtils.degToRad(camera.fov/2)))):4;
    const reservedHeight=mobile?350:270;const availableAspect=Math.max(.35,(el.clientWidth-(mobile?40:340))/Math.max(160,el.clientHeight-reservedHeight));const atlasDistance=Math.max(packingHeight,packingWidth/availableAspect)/(2*Math.tan(T.MathUtils.degToRad(camera.fov/2)))*(el.clientHeight/Math.max(160,el.clientHeight-reservedHeight))*1.08;
    const distance=T.MathUtils.lerp(normalDistance,Math.max(.2,atlasDistance),extent);if(extent>.8)view='front';
@@ -93,10 +111,30 @@ export default function AnatomyScene({atlas,state,onSelect,onProgress,onError}:P
    pickers.forEach((mesh,i)=>{if(!mesh||data[i*4+3]<.5||(hasSolid&&atlas.parts[i].system==='integumentary'))return;worldBox.copy(bounds[i]).translate(mesh.position);if(!raycaster.ray.intersectBox(worldBox,hitPoint))return;const hits=raycaster.intersectObject(mesh,false);if(hits[0]&&hits[0].distance<nearest){nearest=hits[0].distance;found=i;}});
    if(found<0&&amount>.45)found=findTarget(e.clientX-rect.left,e.clientY-rect.top,e.pointerType==='touch'?24:16);if(found>=0){hover.hidden=true;select.current(atlas.parts[found].id);}
   };
+  // Zoom on the exact spot under the fingers or the mouse (2026-11-17): the camera and the orbit centre move towards
+  // that point together, so it stays under the fingers; the orbit centre never leaves the body.
+  const zoomPlane=new T.Plane(),zoomRay=new T.Raycaster(),zoomNdc=new T.Vector2(),focus=new T.Vector3(),viewDir=new T.Vector3();
+  const zoomAt=(clientX:number,clientY:number,scale:number)=>{
+   const rect=renderer.domElement.getBoundingClientRect();zoomNdc.set((clientX-rect.left)/rect.width*2-1,-(clientY-rect.top)/rect.height*2+1);
+   const current=camera.position.distanceTo(controls.target),next=T.MathUtils.clamp(current*scale,controls.minDistance,controls.maxDistance);if(Math.abs(next-current)<1e-6)return;const k=next/current;
+   camera.getWorldDirection(viewDir);zoomPlane.setFromNormalAndCoplanarPoint(viewDir,controls.target);zoomRay.setFromCamera(zoomNdc,camera);
+   if(!zoomRay.ray.intersectPlane(zoomPlane,focus))focus.copy(controls.target);
+   camera.position.sub(focus).multiplyScalar(k).add(focus);controls.target.sub(focus).multiplyScalar(k).add(focus);keepOnScreen();controls.update();dirty=true;
+  };
+  const keepOnScreen=()=>{const clamped=controls.target.clone().clamp(bodyBox.min,bodyBox.max),shift=clamped.sub(controls.target);if(shift.lengthSq()>0){controls.target.add(shift);camera.position.add(shift);}};
+  controls.addEventListener('change',keepOnScreen);
+  const touches=new Map<number,{x:number;y:number}>();let pinchDistance=0;
+  const pinchPoints=()=>[...touches.values()];
+  const touchDown=(e:PointerEvent)=>{if(e.pointerType!=='touch')return;touches.set(e.pointerId,{x:e.clientX,y:e.clientY});if(touches.size===2){const [a,b]=pinchPoints();pinchDistance=Math.hypot(a.x-b.x,a.y-b.y);}};
+  const touchMove=(e:PointerEvent)=>{if(!touches.has(e.pointerId))return;touches.set(e.pointerId,{x:e.clientX,y:e.clientY});if(touches.size!==2||!pinchDistance)return;const [a,b]=pinchPoints(),distance=Math.hypot(a.x-b.x,a.y-b.y);if(distance<1)return;zoomAt((a.x+b.x)/2,(a.y+b.y)/2,pinchDistance/distance);pinchDistance=distance;};
+  const touchUp=(e:PointerEvent)=>{touches.delete(e.pointerId);pinchDistance=0;if(touches.size===2){const [a,b]=pinchPoints();pinchDistance=Math.hypot(a.x-b.x,a.y-b.y);}};
+  const wheel=(e:WheelEvent)=>{e.preventDefault();zoomAt(e.clientX,e.clientY,Math.exp(e.deltaY*.0015));};
+  renderer.domElement.addEventListener('pointerdown',touchDown);renderer.domElement.addEventListener('pointermove',touchMove);renderer.domElement.addEventListener('pointerup',touchUp);renderer.domElement.addEventListener('pointercancel',touchUp);renderer.domElement.addEventListener('wheel',wheel,{passive:false});
   renderer.domElement.addEventListener('pointerdown',down);renderer.domElement.addEventListener('pointermove',move);renderer.domElement.addEventListener('pointerup',up);renderer.domElement.addEventListener('pointercancel',cancel);
   const clock=new T.Clock();let lastExtent=-1;
   const animate=()=>{
    if(disposed)return;frame=requestAnimationFrame(animate);const dt=Math.min(clock.getDelta(),.05),s=latest.current;
+   const wantedKey=s.visible.join(',');if(wantedKey!==lastWanted){lastWanted=wantedKey;ensureChunks(s.visible);}
    const changed=lastState?.visible!==s.visible||lastState?.selected!==s.selected||lastState?.isolate!==s.isolate;
    const moving=Math.abs(amount-s.explode)>.0001;
    if(moving){amount=T.MathUtils.damp(amount,s.explode,8,dt);dirty=true;}
@@ -128,7 +166,7 @@ export default function AnatomyScene({atlas,state,onSelect,onProgress,onError}:P
 
   };animate();
   const contextLost=(e:Event)=>{e.preventDefault();onError('The 3D session was paused by your device. Reload to continue.');};renderer.domElement.addEventListener('webglcontextlost',contextLost);
-  return()=>{disposed=true;abort.abort();cancelAnimationFrame(frame);observer.disconnect();controls.dispose();geometries.forEach(g=>g.dispose());materials.forEach(m=>m.dispose());scene.traverse(o=>{if(o instanceof T.Mesh&&!geometries.includes(o.geometry)){o.geometry.dispose();const ms=Array.isArray(o.material)?o.material:[o.material];ms.forEach(m=>m.dispose());}});env.dispose();partTexture.dispose();selectionTexture.dispose();markerGeometry.dispose();markerMaterial.dispose();hover.remove();renderer.dispose();renderer.domElement.remove();};
+  return()=>{disposed=true;abort.abort();renderer.domElement.removeEventListener('wheel',wheel);cancelAnimationFrame(frame);observer.disconnect();controls.dispose();geometries.forEach(g=>g.dispose());materials.forEach(m=>m.dispose());scene.traverse(o=>{if(o instanceof T.Mesh&&!geometries.includes(o.geometry)){o.geometry.dispose();const ms=Array.isArray(o.material)?o.material:[o.material];ms.forEach(m=>m.dispose());}});env.dispose();partTexture.dispose();selectionTexture.dispose();markerGeometry.dispose();markerMaterial.dispose();hover.remove();renderer.dispose();renderer.domElement.remove();};
  },[atlas]);
  return <div className="scene" ref={host}/>;
 }

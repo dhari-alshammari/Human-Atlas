@@ -1,27 +1,30 @@
 'use client';
 
 import { useEffect, useMemo, useState } from 'react';
+import { RefreshCw, Maximize2 } from 'lucide-react';
 import AnatomyScene from './scene';
-import {
-  defaultVisible,
-  edition,
-  type Atlas,
-  type SceneState,
-  type Sex,
-} from './anatomy';
+import { edition, type Atlas, type SceneState, type Sex, type SystemId } from './anatomy';
 
-const initial = (sex: Sex): SceneState => ({
+// The male model only (the male/female choice was removed at the owner's request).
+const sex: Sex = 'male';
+
+// Two simple views for patients (owner request 2026-11-17), instead of the male/female choice:
+// «العضلات» (muscles with the skeleton, tendons, eyes and ears) and «الأعضاء الداخلية» (the organs).
+type Layer = 'muscles' | 'organs';
+const LAYERS: Record<Layer, SystemId[]> = {
+  muscles: ['muscular', 'skeletal', 'connective', 'sensory'],
+  organs: ['cardiac', 'respiratory', 'digestive', 'urinary', 'endocrine', 'nervous', 'brain', 'lymphatic'],
+};
+
+const initial = (): SceneState => ({
   explode: 0,
-  visible: defaultVisible(sex),
+  visible: LAYERS.muscles,
   selected: [],
   isolate: false,
   view: 'front',
   rotate: false,
   reset: 0,
 });
-
-// The male model only (the male/female choice was removed at the owner's request).
-const sex: Sex = 'male';
 
 // A message from the page around the model (Bubble) that clears the highlighted part, for example when the
 // patient starts a new chat with «+». The main form is { type: 'HUMAN_ATLAS_CLEAR' }; a few simpler forms work too.
@@ -38,18 +41,13 @@ const isClearMessage = (data: unknown): boolean => {
 
 export default function Home() {
   const [atlas, setAtlas] = useState<Atlas | null>(null);
-  const [state, setState] = useState<SceneState>(() => initial('male'));
+  const [state, setState] = useState<SceneState>(initial);
+  const [layer, setLayer] = useState<Layer>('muscles');
   const [progress, setProgress] = useState(0);
   const [error, setError] = useState('');
 
   useEffect(() => {
     const abort = new AbortController();
-
-    setAtlas(null);
-    setProgress(0);
-    setError('');
-    setState(initial(sex));
-
     fetch(edition(sex).manifest, { signal: abort.signal })
       .then(response => {
         if (!response.ok) throw new Error('Unable to load anatomy');
@@ -59,7 +57,6 @@ export default function Home() {
       .catch(err => {
         if (err.name !== 'AbortError') setError(err.message);
       });
-
     return () => abort.abort();
   }, []);
 
@@ -77,6 +74,7 @@ export default function Home() {
     [atlas]
   );
 
+  // The tapped part's name goes to the page around the model exactly as before, in both views.
   const choosePart = (id: string) => {
     const part = parts.get(id);
     if (!part) return;
@@ -99,16 +97,17 @@ export default function Home() {
     );
   };
 
+  const chooseLayer = (next: Layer) => {
+    if (next === layer) return;
+    setLayer(next);
+    // The organs' extra parts load only now; the highlight of a part from the other view is cleared on the model.
+    setState(current => ({ ...current, visible: LAYERS[next], selected: [], reset: current.reset + 1 }));
+  };
+  const flip = () => setState(current => ({ ...current, view: current.view === 'back' ? 'front' : 'back' }));
+  const resetView = () => setState(current => ({ ...current, view: 'front', reset: current.reset + 1 }));
+
   return (
-    <main
-      className="studio"
-      style={{
-        width: '100%',
-        height: '100dvh',
-        overflow: 'hidden',
-        position: 'relative',
-      }}
-    >
+    <main className="studio patient-atlas" dir="rtl">
       {atlas && (
         <AnatomyScene
           atlas={atlas}
@@ -119,38 +118,32 @@ export default function Home() {
         />
       )}
 
+      <div className="atlas-bar">
+        <div className="atlas-layers" role="group" aria-label="العرض">
+          <button type="button" aria-pressed={layer === 'muscles'} onClick={() => chooseLayer('muscles')}>العضلات</button>
+          <button type="button" aria-pressed={layer === 'organs'} onClick={() => chooseLayer('organs')}>الأعضاء الداخلية</button>
+        </div>
+        <div className="atlas-tools">
+          <button type="button" onClick={flip} aria-label="لف الجسم أمام أو خلف">
+            <RefreshCw size={18} aria-hidden="true" />
+            <span>لف</span>
+          </button>
+          <button type="button" onClick={resetView} aria-label="رجوع للجسم كامل">
+            <Maximize2 size={18} aria-hidden="true" />
+            <span>رجوع</span>
+          </button>
+        </div>
+      </div>
 
-      {progress < 100 && !error && (
-        <div
-          role="status"
-          style={{
-            position: 'absolute',
-            bottom: 20,
-            left: 20,
-            zIndex: 20,
-            background: 'white',
-            padding: 12,
-            borderRadius: 8,
-            color: '#222',
-          }}
-        >
-          Loading anatomy: {progress}%
+      {(!atlas || progress < 100) && !error && (
+        <div className="atlas-loading" role="status">
+          <i aria-hidden="true" />
+          <span>جاري التحميل…</span>
         </div>
       )}
 
       {error && (
-        <div
-          role="alert"
-          style={{
-            position: 'absolute',
-            bottom: 20,
-            left: 20,
-            zIndex: 20,
-            background: 'white',
-            padding: 12,
-            color: '#b91c1c',
-          }}
-        >
+        <div className="atlas-loading atlas-error" role="alert">
           {error}
         </div>
       )}
