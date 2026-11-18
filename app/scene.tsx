@@ -20,7 +20,7 @@ export default function AnatomyScene({atlas,state,onSelect,onProgress,onError}:P
   renderer.setPixelRatio(Math.min(devicePixelRatio,innerWidth<768?1.5:2));renderer.setClearColor('#f2f3f3');renderer.outputColorSpace=T.SRGBColorSpace;renderer.toneMapping=T.ACESFilmicToneMapping;renderer.toneMappingExposure=1.12;el.appendChild(renderer.domElement);
   renderer.domElement.setAttribute('aria-label','Interactive human anatomy. Drag to orbit, pinch or scroll to zoom, and tap a structure to inspect it.');
   const scene=new T.Scene(),camera=new T.PerspectiveCamera(34,1,.005,100),controls=new OrbitControls(camera,renderer.domElement);
-  camera.position.set(1.4,1.05,3.6);controls.target.set(0,.85,0);controls.enableDamping=true;controls.dampingFactor=.085;controls.minDistance=.38;controls.maxDistance=8;controls.enableZoom=false;controls.minPolarAngle=controls.maxPolarAngle=Math.PI/2-.02;controls.screenSpacePanning=true;controls.addEventListener('change',()=>{dirty=true;});
+  camera.position.set(1.4,1.05,3.6);controls.target.set(0,.85,0);controls.enableDamping=true;controls.dampingFactor=.085;controls.minDistance=.38;controls.maxDistance=8;controls.enableZoom=false;controls.enabled=false;controls.minPolarAngle=controls.maxPolarAngle=Math.PI/2-.02;controls.screenSpacePanning=true;controls.addEventListener('change',()=>{dirty=true;});
   const pmrem=new T.PMREMGenerator(renderer),room=new RoomEnvironment(),env=pmrem.fromScene(room,.04);scene.environment=env.texture;room.dispose();pmrem.dispose();
   scene.add(new T.HemisphereLight(0xffffff,0xa7acb2,1.05));
   const key=new T.DirectionalLight(0xfffaf4,2.3);key.position.set(-2,4,3);scene.add(key);
@@ -130,17 +130,36 @@ export default function AnatomyScene({atlas,state,onSelect,onProgress,onError}:P
    const shift=next.sub(t);if(shift.lengthSq()>1e-12){t.add(shift);camera.position.add(shift);}
   };
   controls.addEventListener('change',keepOnScreen);
-  const touches=new Map<number,{x:number;y:number}>();let pinchDistance=0;
-  const pinchPoints=()=>[...touches.values()];
-  const touchDown=(e:PointerEvent)=>{if(e.pointerType!=='touch')return;touches.set(e.pointerId,{x:e.clientX,y:e.clientY});if(touches.size===2){const [a,b]=pinchPoints();pinchDistance=Math.hypot(a.x-b.x,a.y-b.y);}};
-  const touchMove=(e:PointerEvent)=>{if(!touches.has(e.pointerId))return;touches.set(e.pointerId,{x:e.clientX,y:e.clientY});if(touches.size!==2||!pinchDistance)return;const [a,b]=pinchPoints(),distance=Math.hypot(a.x-b.x,a.y-b.y);if(distance<1)return;zoomAt((a.x+b.x)/2,(a.y+b.y)/2,pinchDistance/distance);pinchDistance=distance;};
-  const touchUp=(e:PointerEvent)=>{touches.delete(e.pointerId);pinchDistance=0;if(touches.size===2){const [a,b]=pinchPoints();pinchDistance=Math.hypot(a.x-b.x,a.y-b.y);}};
+  // Our own gestures (2026-11-18), instead of the library's: one finger left/right turns the body on its own
+  // axis, one finger up/down slides the view along the body (head to feet); two fingers zoom on the spot between
+  // them and slide with them. The body never tilts, and keepOnScreen stops the view at the head and the feet.
+  const pointers=new Map<number,{x:number;y:number}>();let lastPinch=0,lastMid:{x:number;y:number}|null=null;
+  const worldPerPixel=()=>2*camera.position.distanceTo(controls.target)*Math.tan(T.MathUtils.degToRad(camera.fov/2))/Math.max(1,el.clientHeight);
+  const rightAxis=new T.Vector3(),worldUp=new T.Vector3(0,1,0);
+  const slide=(dx:number,dy:number)=>{const k=worldPerPixel();rightAxis.setFromMatrixColumn(camera.matrixWorld,0).setY(0).normalize();const shift=rightAxis.multiplyScalar(-dx*k).addScaledVector(worldUp,dy*k);controls.target.add(shift);camera.position.add(shift);};
+  const turn=(dx:number)=>{const offset=camera.position.clone().sub(controls.target).applyAxisAngle(worldUp,-dx*2*Math.PI/Math.max(320,el.clientWidth)*.9);camera.position.copy(controls.target).add(offset);};
+  const settle=()=>{keepOnScreen();controls.update();dirty=true;};
+  const middle=()=>{const [a,b]=[...pointers.values()];return {x:(a.x+b.x)/2,y:(a.y+b.y)/2,d:Math.hypot(a.x-b.x,a.y-b.y)};};
+  // A quick swipe keeps gliding a little and slows down, like scrolling a page (2026-11-18).
+  const glide={vx:0,vy:0,last:0};
+  const gestureDown=(e:PointerEvent)=>{glide.vx=glide.vy=0;glide.last=performance.now();pointers.set(e.pointerId,{x:e.clientX,y:e.clientY});try{renderer.domElement.setPointerCapture(e.pointerId);}catch{/* a synthetic pointer */}if(pointers.size===2){const m=middle();lastPinch=m.d;lastMid={x:m.x,y:m.y};}};
+  const gestureMove=(e:PointerEvent)=>{
+   const previous=pointers.get(e.pointerId);if(!previous)return;if(e.pointerType==='mouse'&&!e.buttons){pointers.delete(e.pointerId);return;}
+   const dx=e.clientX-previous.x,dy=e.clientY-previous.y;pointers.set(e.pointerId,{x:e.clientX,y:e.clientY});
+   if(pointers.size===1){const now=performance.now(),ms=Math.max(1,now-glide.last);glide.last=now;
+    const horizontal=Math.abs(dx)>=Math.abs(dy)*.6,vertical=Math.abs(dy)>Math.abs(dx)*.6;
+    glide.vx=T.MathUtils.lerp(glide.vx,horizontal?dx/ms:0,.5);glide.vy=T.MathUtils.lerp(glide.vy,vertical?dy/ms:0,.5);
+    if(horizontal)turn(dx);if(vertical)slide(0,dy);settle();return;}
+   if(pointers.size===2&&lastMid){const m=middle();if(lastPinch>1&&m.d>1)zoomAt(m.x,m.y,lastPinch/m.d);slide(m.x-lastMid.x,m.y-lastMid.y);lastPinch=m.d;lastMid={x:m.x,y:m.y};settle();}
+  };
+  const gestureUp=(e:PointerEvent)=>{if(pointers.size>1||performance.now()-glide.last>80)glide.vx=glide.vy=0;pointers.delete(e.pointerId);lastMid=null;lastPinch=0;if(pointers.size===2){const m=middle();lastPinch=m.d;lastMid={x:m.x,y:m.y};}};
   const wheel=(e:WheelEvent)=>{e.preventDefault();zoomAt(e.clientX,e.clientY,Math.exp(e.deltaY*.0015));};
-  renderer.domElement.addEventListener('pointerdown',touchDown);renderer.domElement.addEventListener('pointermove',touchMove);renderer.domElement.addEventListener('pointerup',touchUp);renderer.domElement.addEventListener('pointercancel',touchUp);renderer.domElement.addEventListener('wheel',wheel,{passive:false});
+  renderer.domElement.addEventListener('pointerdown',gestureDown);renderer.domElement.addEventListener('pointermove',gestureMove);renderer.domElement.addEventListener('pointerup',gestureUp);renderer.domElement.addEventListener('pointercancel',gestureUp);renderer.domElement.addEventListener('wheel',wheel,{passive:false});
   renderer.domElement.addEventListener('pointerdown',down);renderer.domElement.addEventListener('pointermove',move);renderer.domElement.addEventListener('pointerup',up);renderer.domElement.addEventListener('pointercancel',cancel);
   const clock=new T.Clock();let lastExtent=-1;
   const animate=()=>{
    if(disposed)return;frame=requestAnimationFrame(animate);const dt=Math.min(clock.getDelta(),.05),s=latest.current;
+   if(!pointers.size&&(Math.abs(glide.vx)>.02||Math.abs(glide.vy)>.02)){const ms=dt*1000;if(Math.abs(glide.vx)>.02)turn(glide.vx*ms);if(Math.abs(glide.vy)>.02)slide(0,glide.vy*ms);settle();const decay=Math.exp(-dt*4);glide.vx*=decay;glide.vy*=decay;}
    const wantedKey=s.visible.join(',');if(wantedKey!==lastWanted){lastWanted=wantedKey;ensureChunks(s.visible);}
    const changed=lastState?.visible!==s.visible||lastState?.selected!==s.selected||lastState?.isolate!==s.isolate;
    const moving=Math.abs(amount-s.explode)>.0001;
