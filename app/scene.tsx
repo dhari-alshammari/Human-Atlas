@@ -142,17 +142,19 @@ export default function AnatomyScene({atlas,state,onSelect,onProgress,onError}:P
   const slide=(dx:number,dy:number)=>{const k=worldPerPixel();rightAxis.setFromMatrixColumn(camera.matrixWorld,0).setY(0).normalize();const shift=rightAxis.multiplyScalar(-dx*k).addScaledVector(worldUp,dy*k);controls.target.add(shift);camera.position.add(shift);};
   const turn=(dx:number)=>{const offset=camera.position.clone().sub(controls.target).applyAxisAngle(worldUp,-dx*2*Math.PI/Math.max(320,el.clientWidth)*.9);camera.position.copy(controls.target).add(offset);};
   const settle=()=>{keepOnScreen();controls.update();dirty=true;};
+  // Like zooming a photo (2026-11-18): with the whole body on screen one finger turns it; once zoomed in, one finger
+  // moves the picture in every direction and the body does not turn (the «لف» button still turns it).
+  const isZoomed=()=>camera.position.distanceTo(controls.target)<fitDistance*.85;
   const middle=()=>{const [a,b]=[...pointers.values()];return {x:(a.x+b.x)/2,y:(a.y+b.y)/2,d:Math.hypot(a.x-b.x,a.y-b.y)};};
   // A quick swipe keeps gliding a little and slows down, like scrolling a page (2026-11-18).
-  const glide={vx:0,vy:0,last:0};
+  const glide={vx:0,vy:0,last:0,pan:false};
   const gestureDown=(e:PointerEvent)=>{glide.vx=glide.vy=0;glide.last=performance.now();pointers.set(e.pointerId,{x:e.clientX,y:e.clientY});try{renderer.domElement.setPointerCapture(e.pointerId);}catch{/* a synthetic pointer */}if(pointers.size===2){const m=middle();lastPinch=m.d;lastMid={x:m.x,y:m.y};}};
   const gestureMove=(e:PointerEvent)=>{
    const previous=pointers.get(e.pointerId);if(!previous)return;if(e.pointerType==='mouse'&&!e.buttons){pointers.delete(e.pointerId);return;}
    const dx=e.clientX-previous.x,dy=e.clientY-previous.y;pointers.set(e.pointerId,{x:e.clientX,y:e.clientY});
    if(pointers.size===1){const now=performance.now(),ms=Math.max(1,now-glide.last);glide.last=now;
-    const horizontal=Math.abs(dx)>=Math.abs(dy)*.6,vertical=Math.abs(dy)>Math.abs(dx)*.6;
-    glide.vx=T.MathUtils.lerp(glide.vx,horizontal?dx/ms:0,.5);glide.vy=T.MathUtils.lerp(glide.vy,vertical?dy/ms:0,.5);
-    if(horizontal)turn(dx);if(vertical)slide(0,dy);settle();return;}
+    glide.pan=isZoomed();glide.vx=T.MathUtils.lerp(glide.vx,dx/ms,.5);glide.vy=T.MathUtils.lerp(glide.vy,glide.pan?dy/ms:0,.5);
+    if(glide.pan)slide(dx,dy);else turn(dx);settle();return;}
    if(pointers.size===2&&lastMid){const m=middle();if(lastPinch>1&&m.d>1)zoomAt(m.x,m.y,lastPinch/m.d);slide(m.x-lastMid.x,m.y-lastMid.y);lastPinch=m.d;lastMid={x:m.x,y:m.y};settle();}
   };
   const gestureUp=(e:PointerEvent)=>{if(pointers.size>1||performance.now()-glide.last>80)glide.vx=glide.vy=0;pointers.delete(e.pointerId);lastMid=null;lastPinch=0;if(pointers.size===2){const m=middle();lastPinch=m.d;lastMid={x:m.x,y:m.y};}};
@@ -162,7 +164,7 @@ export default function AnatomyScene({atlas,state,onSelect,onProgress,onError}:P
   const clock=new T.Clock();let lastExtent=-1;
   const animate=()=>{
    if(disposed)return;frame=requestAnimationFrame(animate);const dt=Math.min(clock.getDelta(),.05),s=latest.current;
-   if(!pointers.size&&(Math.abs(glide.vx)>.02||Math.abs(glide.vy)>.02)){const ms=dt*1000;if(Math.abs(glide.vx)>.02)turn(glide.vx*ms);if(Math.abs(glide.vy)>.02)slide(0,glide.vy*ms);settle();const decay=Math.exp(-dt*4);glide.vx*=decay;glide.vy*=decay;}
+   if(!pointers.size&&(Math.abs(glide.vx)>.02||Math.abs(glide.vy)>.02)){const ms=dt*1000;if(glide.pan)slide(glide.vx*ms,glide.vy*ms);else turn(glide.vx*ms);settle();const decay=Math.exp(-dt*4);glide.vx*=decay;glide.vy*=decay;}
    const wantedKey=s.visible.join(',');if(wantedKey!==lastWanted){lastWanted=wantedKey;ensureChunks(s.visible);}
    const changed=lastState?.visible!==s.visible||lastState?.selected!==s.selected||lastState?.isolate!==s.isolate;
    const moving=Math.abs(amount-s.explode)>.0001;
@@ -181,7 +183,8 @@ export default function AnatomyScene({atlas,state,onSelect,onProgress,onError}:P
      markerPositions.set(data[i*4+3]>.5?[c.x+dx,c.y+dy,c.z+dz]:[10000,10000,10000],i*3);const mesh=pickers[i];if(mesh){mesh.position.set(dx,dy,dz);mesh.updateMatrix();mesh.updateMatrixWorld(true);}
     });partTexture.needsUpdate=true;selectionTexture.needsUpdate=true;markerGeometry.attributes.position.needsUpdate=true;lastState=s;lastExtent=amount;dirty=true;
    }
-   if(s.view!==lastView||s.reset!==lastReset){fit(s.view,amount);lastView=s.view;lastReset=s.reset;}
+   if(s.reset!==lastReset||(s.view!==lastView&&!isZoomed())){fit(s.view,amount);lastView=s.view;lastReset=s.reset;}
+   else if(s.view!==lastView){/* «لف» while zoomed in: the same place, seen from the other side */const offset=camera.position.clone().sub(controls.target).applyAxisAngle(new T.Vector3(0,1,0),Math.PI);camera.position.copy(controls.target).add(offset);settle();lastView=s.view;}
    if(moving&&!s.isolate)fit(amount>.5?'front':s.view,Math.max(0,(amount-.3)/.7));
    const isolateKey=s.isolate?s.selected.join(',')+':'+s.reset+':'+s.inspectorOpen+':'+camera.aspect:'';
    if(isolateKey!==lastIsolate||(s.isolate&&moving)){
