@@ -20,7 +20,7 @@ export default function AnatomyScene({atlas,state,onSelect,onProgress,onError}:P
   renderer.setPixelRatio(Math.min(devicePixelRatio,innerWidth<768?1.5:2));renderer.setClearColor('#f2f3f3');renderer.outputColorSpace=T.SRGBColorSpace;renderer.toneMapping=T.ACESFilmicToneMapping;renderer.toneMappingExposure=1.12;el.appendChild(renderer.domElement);
   renderer.domElement.setAttribute('aria-label','Interactive human anatomy. Drag to orbit, pinch or scroll to zoom, and tap a structure to inspect it.');
   const scene=new T.Scene(),camera=new T.PerspectiveCamera(34,1,.005,100),controls=new OrbitControls(camera,renderer.domElement);
-  camera.position.set(1.4,1.05,3.6);controls.target.set(0,.85,0);controls.enableDamping=true;controls.dampingFactor=.085;controls.minDistance=.38;controls.maxDistance=8;controls.enableZoom=false;controls.enabled=false;controls.minPolarAngle=controls.maxPolarAngle=Math.PI/2-.02;controls.screenSpacePanning=true;controls.addEventListener('change',()=>{dirty=true;});
+  camera.position.set(1.4,1.05,3.6);controls.target.set(0,.85,0);controls.enableDamping=true;controls.dampingFactor=.085;controls.minDistance=.3;controls.maxDistance=8;controls.enableZoom=false;controls.enabled=false;controls.minPolarAngle=controls.maxPolarAngle=Math.PI/2-.02;controls.screenSpacePanning=true;controls.addEventListener('change',()=>{dirty=true;});
   const pmrem=new T.PMREMGenerator(renderer),room=new RoomEnvironment(),env=pmrem.fromScene(room,.04);scene.environment=env.texture;room.dispose();pmrem.dispose();
   scene.add(new T.HemisphereLight(0xffffff,0xa7acb2,1.05));
   const key=new T.DirectionalLight(0xfffaf4,2.3);key.position.set(-2,4,3);scene.add(key);
@@ -86,14 +86,14 @@ export default function AnatomyScene({atlas,state,onSelect,onProgress,onError}:P
   let lastWanted='';
   // The whole body, centred, below the small top bar (2026-11-17): the earlier layout reserved room for panels.
   // The frame is the parts of the chosen view (the organs view is smaller than the whole body).
-  const bodyBox=new T.Box3(),bodyCenter=new T.Vector3(),bodySize=new T.Vector3();
+  const bodyBox=new T.Box3(),bodyCenter=new T.Vector3(),bodySize=new T.Vector3();let fitDistance=4;
   const frameVisible=()=>{const shown=new Set<string>(latest.current.visible);bodyBox.makeEmpty();atlas.parts.forEach((p,i)=>{if(shown.has(p.system))bodyBox.union(bounds[i]);});if(bodyBox.isEmpty())bounds.forEach(b=>bodyBox.union(b));bodyBox.getCenter(bodyCenter);bodyBox.getSize(bodySize);};
   const fit=(view:string,extent=0)=>{
    if(extent<=.1){frameVisible();const top=64,bottom=16,h=Math.max(160,el.clientHeight-top-bottom),half=Math.tan(T.MathUtils.degToRad(camera.fov/2));
     const distance=Math.max(bodySize.y*1.06*el.clientHeight/h,bodySize.x*1.1/camera.aspect)/(2*half);
     const direction=view==='back'?new T.Vector3(0,.02,-1):new T.Vector3(0,.02,1);
     camera.clearViewOffset();camera.setViewOffset(el.clientWidth,el.clientHeight,0,-(top-bottom)/2,el.clientWidth,el.clientHeight);
-    controls.target.copy(bodyCenter);camera.position.copy(bodyCenter).addScaledVector(direction,distance);controls.maxDistance=distance*1.35;controls.update();dirty=true;return;}
+    controls.target.copy(bodyCenter);camera.position.copy(bodyCenter).addScaledVector(direction,distance);controls.maxDistance=distance*1.35;fitDistance=distance;controls.update();dirty=true;return;}
    const aspect=camera.aspect,mobile=el.clientWidth<768,normalDistance=mobile?Math.max(4.5,1.8*el.clientHeight/Math.max(160,el.clientHeight-350)/(2*Math.tan(T.MathUtils.degToRad(camera.fov/2)))):4;
    const reservedHeight=mobile?350:270;const availableAspect=Math.max(.35,(el.clientWidth-(mobile?40:340))/Math.max(160,el.clientHeight-reservedHeight));const atlasDistance=Math.max(packingHeight,packingWidth/availableAspect)/(2*Math.tan(T.MathUtils.degToRad(camera.fov/2)))*(el.clientHeight/Math.max(160,el.clientHeight-reservedHeight))*1.08;
    const distance=T.MathUtils.lerp(normalDistance,Math.max(.2,atlasDistance),extent);if(extent>.8)view='front';
@@ -125,7 +125,10 @@ export default function AnatomyScene({atlas,state,onSelect,onProgress,onError}:P
   // reaches the screen edges, so no empty space or floor fills the screen, whatever the zoom.
   const keepOnScreen=()=>{
    const halfH=camera.position.distanceTo(controls.target)*Math.tan(T.MathUtils.degToRad(camera.fov/2)),halfW=halfH*camera.aspect;
-   const limit=(min:number,max:number,half:number,value:number)=>{const centre=(min+max)/2,room=Math.max(0,(max-min)/2-half);return T.MathUtils.clamp(value,centre-room,centre+room);};
+   // When zoomed in, the view may go a little past the ends of the body (2026-11-18: the toes, the top of the head and
+   // the fingertips are nearer the camera than the middle of the body, so they were cut off at the edge).
+   const zoomedIn=T.MathUtils.clamp((fitDistance-camera.position.distanceTo(controls.target))/(fitDistance*.5),0,1);
+   const limit=(min:number,max:number,half:number,value:number)=>{const centre=(min+max)/2,room=Math.max(0,(max-min)/2-half)+.75*half*zoomedIn;return T.MathUtils.clamp(value,centre-room,centre+room);};
    const t=controls.target,next=new T.Vector3(limit(bodyBox.min.x,bodyBox.max.x,halfW,t.x),limit(bodyBox.min.y,bodyBox.max.y,halfH,t.y),limit(bodyBox.min.z,bodyBox.max.z,halfW,t.z));
    const shift=next.sub(t);if(shift.lengthSq()>1e-12){t.add(shift);camera.position.add(shift);}
   };
