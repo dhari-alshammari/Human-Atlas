@@ -20,7 +20,7 @@ export default function AnatomyScene({atlas,state,onSelect,onProgress,onError}:P
   renderer.setPixelRatio(Math.min(devicePixelRatio,innerWidth<768?1.5:2));renderer.setClearColor('#f2f3f3');renderer.outputColorSpace=T.SRGBColorSpace;renderer.toneMapping=T.ACESFilmicToneMapping;renderer.toneMappingExposure=1.12;el.appendChild(renderer.domElement);
   renderer.domElement.setAttribute('aria-label','Interactive human anatomy. Drag to orbit, pinch or scroll to zoom, and tap a structure to inspect it.');
   const scene=new T.Scene(),camera=new T.PerspectiveCamera(34,1,.005,100),controls=new OrbitControls(camera,renderer.domElement);
-  camera.position.set(1.4,1.05,3.6);controls.target.set(0,.85,0);controls.enableDamping=true;controls.dampingFactor=.085;controls.minDistance=.12;controls.maxDistance=8;controls.maxPolarAngle=Math.PI*.8;controls.enableZoom=false;controls.addEventListener('change',()=>{dirty=true;});
+  camera.position.set(1.4,1.05,3.6);controls.target.set(0,.85,0);controls.enableDamping=true;controls.dampingFactor=.085;controls.minDistance=.38;controls.maxDistance=8;controls.enableZoom=false;controls.minPolarAngle=controls.maxPolarAngle=Math.PI/2-.02;controls.screenSpacePanning=true;controls.addEventListener('change',()=>{dirty=true;});
   const pmrem=new T.PMREMGenerator(renderer),room=new RoomEnvironment(),env=pmrem.fromScene(room,.04);scene.environment=env.texture;room.dispose();pmrem.dispose();
   scene.add(new T.HemisphereLight(0xffffff,0xa7acb2,1.05));
   const key=new T.DirectionalLight(0xfffaf4,2.3);key.position.set(-2,4,3);scene.add(key);
@@ -121,7 +121,14 @@ export default function AnatomyScene({atlas,state,onSelect,onProgress,onError}:P
    if(!zoomRay.ray.intersectPlane(zoomPlane,focus))focus.copy(controls.target);
    camera.position.sub(focus).multiplyScalar(k).add(focus);controls.target.sub(focus).multiplyScalar(k).add(focus);keepOnScreen();controls.update();dirty=true;
   };
-  const keepOnScreen=()=>{const clamped=controls.target.clone().clamp(bodyBox.min,bodyBox.max),shift=clamped.sub(controls.target);if(shift.lengthSq()>0){controls.target.add(shift);camera.position.add(shift);}};
+  // The body always stays on the screen (2026-11-18): the orbit centre may move only as far as the body still
+  // reaches the screen edges, so no empty space or floor fills the screen, whatever the zoom.
+  const keepOnScreen=()=>{
+   const halfH=camera.position.distanceTo(controls.target)*Math.tan(T.MathUtils.degToRad(camera.fov/2)),halfW=halfH*camera.aspect;
+   const limit=(min:number,max:number,half:number,value:number)=>{const centre=(min+max)/2,room=Math.max(0,(max-min)/2-half);return T.MathUtils.clamp(value,centre-room,centre+room);};
+   const t=controls.target,next=new T.Vector3(limit(bodyBox.min.x,bodyBox.max.x,halfW,t.x),limit(bodyBox.min.y,bodyBox.max.y,halfH,t.y),limit(bodyBox.min.z,bodyBox.max.z,halfW,t.z));
+   const shift=next.sub(t);if(shift.lengthSq()>1e-12){t.add(shift);camera.position.add(shift);}
+  };
   controls.addEventListener('change',keepOnScreen);
   const touches=new Map<number,{x:number;y:number}>();let pinchDistance=0;
   const pinchPoints=()=>[...touches.values()];
@@ -161,7 +168,7 @@ export default function AnatomyScene({atlas,state,onSelect,onProgress,onError}:P
     }else if(lastIsolate){camera.clearViewOffset();fit(s.view,amount);}
     lastIsolate=isolateKey;
    }
-   controls.enableRotate=amount<.8;controls.mouseButtons.LEFT=amount<.8?T.MOUSE.ROTATE:T.MOUSE.PAN;controls.touches.ONE=amount<.8?T.TOUCH.ROTATE:T.TOUCH.PAN;ground.visible=platform.visible=ring.visible=innerRing.visible=amount<.5&&!s.isolate;markers.visible=amount>.75;controls.autoRotate=s.rotate&&!s.isolate&&amount<.4;controls.autoRotateSpeed=.65;controls.update();if(controls.autoRotate)dirty=true;
+   controls.enableRotate=amount<.8;controls.mouseButtons.LEFT=amount<.8?T.MOUSE.ROTATE:T.MOUSE.PAN;controls.touches.ONE=amount<.8?T.TOUCH.ROTATE:T.TOUCH.PAN;ground.visible=platform.visible=ring.visible=innerRing.visible=false;markers.visible=amount>.75;controls.autoRotate=s.rotate&&!s.isolate&&amount<.4;controls.autoRotateSpeed=.65;controls.update();if(controls.autoRotate)dirty=true;
    if(dirty){renderer.render(scene,camera);targets=[];if(amount>.45){const hasSolid=atlas.parts.some((p,i)=>p.system!=='integumentary'&&data[i*4+3]>.5);atlas.parts.forEach((p,i)=>{if(data[i*4+3]<.5||(hasSolid&&p.system==='integumentary'))return;let left=Infinity,right=-Infinity,top=Infinity,bottom=-Infinity;for(let corner=0;corner<8;corner++){projected.set(p.bounds[(corner&1)?1:0][0]+data[i*4],p.bounds[(corner&2)?1:0][1]+data[i*4+1],p.bounds[(corner&4)?1:0][2]+data[i*4+2]).project(camera);const x=(projected.x+1)*el.clientWidth/2,y=(1-projected.y)*el.clientHeight/2;left=Math.min(left,x);right=Math.max(right,x);top=Math.min(top,y);bottom=Math.max(bottom,y);}projected.copy(centers[i]).add(new T.Vector3(data[i*4],data[i*4+1],data[i*4+2])).project(camera);if(projected.z< -1||projected.z>1)return;targets.push({index:i,x:(projected.x+1)*el.clientWidth/2,y:(1-projected.y)*el.clientHeight/2,left,right,top,bottom});});}dirty=false;}
 
   };animate();

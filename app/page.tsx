@@ -123,13 +123,13 @@ export default function Home() {
           <button type="button" aria-pressed={layer === 'muscles'} onClick={() => chooseLayer('muscles')}>العضلات</button>
           <button type="button" aria-pressed={layer === 'organs'} onClick={() => chooseLayer('organs')}>الأعضاء الداخلية</button>
         </div>
-        <div className="atlas-tools">
+        <div className="atlas-layers atlas-tools" role="group" aria-label="التحكم">
           <button type="button" onClick={flip} aria-label="لف الجسم أمام أو خلف">
-            <RefreshCw size={18} aria-hidden="true" />
+            <RefreshCw size={16} aria-hidden="true" />
             <span>لف</span>
           </button>
           <button type="button" onClick={resetView} aria-label="رجوع للجسم كامل">
-            <Maximize2 size={18} aria-hidden="true" />
+            <Maximize2 size={16} aria-hidden="true" />
             <span>رجوع</span>
           </button>
         </div>
