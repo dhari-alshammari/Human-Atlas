@@ -50,11 +50,11 @@ export default function AnatomyScene({atlas,state,onSelect,onProgress,onError}:P
    const m=new T.MeshStandardMaterial({color:SYSTEMS.find(s=>s.id===system)?.color??'#aebbb8',metalness:.08,roughness:.53,side:T.DoubleSide,transparent:system==='integumentary',opacity:system==='integumentary'?.1:1,depthWrite:system!=='integumentary'});
    m.onBeforeCompile=shader=>{
     shader.uniforms.partState={value:partTexture};shader.uniforms.selectionState={value:selectionTexture};shader.uniforms.stateWidth={value:width};
-    shader.vertexShader='attribute float partIndex; uniform sampler2D partState; uniform sampler2D selectionState; uniform float stateWidth; varying float partVisible; varying float partSelected;\n'+shader.vertexShader;
-    shader.vertexShader=shader.vertexShader.replace('#include <begin_vertex>','#include <begin_vertex>\nvec2 stateUv = vec2((partIndex + 0.5) / stateWidth, 0.5); vec4 state = texture2D(partState, stateUv); transformed += state.xyz; partVisible = state.w; partSelected = texture2D(selectionState, stateUv).r;');
-    shader.fragmentShader='varying float partVisible; varying float partSelected;\n'+shader.fragmentShader;
+    shader.vertexShader='attribute float partIndex; uniform sampler2D partState; uniform sampler2D selectionState; uniform float stateWidth; varying float partVisible; varying float partSelected; varying float partHighlighted;\n'+shader.vertexShader;
+    shader.vertexShader=shader.vertexShader.replace('#include <begin_vertex>','#include <begin_vertex>\nvec2 stateUv = vec2((partIndex + 0.5) / stateWidth, 0.5); vec4 state = texture2D(partState, stateUv); transformed += state.xyz; partVisible = state.w; vec4 marks = texture2D(selectionState, stateUv); partSelected = marks.r; partHighlighted = marks.g;');
+    shader.fragmentShader='varying float partVisible; varying float partSelected; varying float partHighlighted;\n'+shader.fragmentShader;
     shader.fragmentShader=shader.fragmentShader.replace('#include <clipping_planes_fragment>','#include <clipping_planes_fragment>\nif (partVisible < 0.5) discard;');
-    shader.fragmentShader=shader.fragmentShader.replace('#include <color_fragment>','#include <color_fragment>\ndiffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.42, 0.85, 0.78), partSelected * 0.75);');
+    shader.fragmentShader=shader.fragmentShader.replace('#include <color_fragment>','#include <color_fragment>\ndiffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.42, 0.85, 0.78), partSelected * 0.75); diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.56, 0.29, 0.96), partHighlighted * 0.85);');
    };materials.push(m);return m;
   };
   const mats=new Map(SYSTEMS.map(s=>[s.id,materialFor(s.id)]));
@@ -136,42 +136,60 @@ export default function AnatomyScene({atlas,state,onSelect,onProgress,onError}:P
   // Our own gestures (2026-11-18), instead of the library's: one finger left/right turns the body on its own
   // axis, one finger up/down slides the view along the body (head to feet); two fingers zoom on the spot between
   // them and slide with them. The body never tilts, and keepOnScreen stops the view at the head and the feet.
-  const pointers=new Map<number,{x:number;y:number}>();let lastPinch=0,lastMid:{x:number;y:number}|null=null;
+  const pointers=new Map<number,{x:number;y:number}>();let lastPinch=0,lastMid:{x:number;y:number}|null=null,lastAngle=0,twist=0,twisting=false;
   const worldPerPixel=()=>2*camera.position.distanceTo(controls.target)*Math.tan(T.MathUtils.degToRad(camera.fov/2))/Math.max(1,el.clientHeight);
   const rightAxis=new T.Vector3(),worldUp=new T.Vector3(0,1,0);
   const slide=(dx:number,dy:number)=>{const k=worldPerPixel();rightAxis.setFromMatrixColumn(camera.matrixWorld,0).setY(0).normalize();const shift=rightAxis.multiplyScalar(-dx*k).addScaledVector(worldUp,dy*k);controls.target.add(shift);camera.position.add(shift);};
+  // Turning around the body's own upright axis (2026-11-20): with two fingers twisted, also when zoomed in, the body
+  // turns like on a turntable and the place in view stays at the same height; keepOnScreen keeps it on the screen.
+  const bodyAxis=new T.Vector3();
+  const turnBody=(angle:number)=>{bodyAxis.set(bodyCenter.x,0,bodyCenter.z);camera.position.sub(bodyAxis).applyAxisAngle(worldUp,angle).add(bodyAxis);controls.target.sub(bodyAxis).applyAxisAngle(worldUp,angle).add(bodyAxis);};
   const turn=(dx:number)=>{const offset=camera.position.clone().sub(controls.target).applyAxisAngle(worldUp,-dx*2*Math.PI/Math.max(320,el.clientWidth)*.9);camera.position.copy(controls.target).add(offset);};
   const settle=()=>{keepOnScreen();controls.update();dirty=true;};
   // Like zooming a photo (2026-11-18): with the whole body on screen one finger turns it; once zoomed in, one finger
   // moves the picture in every direction and the body does not turn (the «لف» button still turns it).
   const isZoomed=()=>camera.position.distanceTo(controls.target)<fitDistance*.85;
-  const middle=()=>{const [a,b]=[...pointers.values()];return {x:(a.x+b.x)/2,y:(a.y+b.y)/2,d:Math.hypot(a.x-b.x,a.y-b.y)};};
+  const middle=()=>{const [a,b]=[...pointers.values()];return {x:(a.x+b.x)/2,y:(a.y+b.y)/2,d:Math.hypot(a.x-b.x,a.y-b.y),a:Math.atan2(b.y-a.y,b.x-a.x)};};
   // A quick swipe keeps gliding a little and slows down, like scrolling a page (2026-11-18).
   const glide={vx:0,vy:0,last:0,pan:false};
-  const gestureDown=(e:PointerEvent)=>{glide.vx=glide.vy=0;glide.last=performance.now();pointers.set(e.pointerId,{x:e.clientX,y:e.clientY});try{renderer.domElement.setPointerCapture(e.pointerId);}catch{/* a synthetic pointer */}if(pointers.size===2){const m=middle();lastPinch=m.d;lastMid={x:m.x,y:m.y};}};
+  const gestureDown=(e:PointerEvent)=>{glide.vx=glide.vy=0;glide.last=performance.now();pointers.set(e.pointerId,{x:e.clientX,y:e.clientY});try{renderer.domElement.setPointerCapture(e.pointerId);}catch{/* a synthetic pointer */}if(pointers.size===2){const m=middle();lastPinch=m.d;lastMid={x:m.x,y:m.y};lastAngle=m.a;twist=0;twisting=false;}};
   const gestureMove=(e:PointerEvent)=>{
    const previous=pointers.get(e.pointerId);if(!previous)return;if(e.pointerType==='mouse'&&!e.buttons){pointers.delete(e.pointerId);return;}
    const dx=e.clientX-previous.x,dy=e.clientY-previous.y;pointers.set(e.pointerId,{x:e.clientX,y:e.clientY});
    if(pointers.size===1){const now=performance.now(),ms=Math.max(1,now-glide.last);glide.last=now;
     glide.pan=isZoomed();glide.vx=T.MathUtils.lerp(glide.vx,dx/ms,.5);glide.vy=T.MathUtils.lerp(glide.vy,glide.pan?dy/ms:0,.5);
-    if(glide.pan)slide(dx,dy);else turn(dx);settle();return;}
-   if(pointers.size===2&&lastMid){const m=middle();if(lastPinch>1&&m.d>1)zoomAt(m.x,m.y,lastPinch/m.d);slide(m.x-lastMid.x,m.y-lastMid.y);lastPinch=m.d;lastMid={x:m.x,y:m.y};settle();}
+    if(glide.pan&&(e.shiftKey||e.buttons===2)){glide.vx=glide.vy=0;turnBody(-dx*2*Math.PI/Math.max(320,el.clientWidth)*.9);settle();return;}if(glide.pan)slide(dx,dy);else turn(dx);settle();return;}
+   if(pointers.size===2&&lastMid){const m=middle();
+    // A twist of the two fingers turns the body; a small wobble while pinching does not (it starts after about 10°).
+    let delta=m.a-lastAngle;if(delta>Math.PI)delta-=2*Math.PI;if(delta<-Math.PI)delta+=2*Math.PI;lastAngle=m.a;twist+=delta;if(!twisting&&Math.abs(twist)>.17){twisting=true;delta=twist;}
+    if(twisting)turnBody(-delta);
+    if(lastPinch>1&&m.d>1)zoomAt(m.x,m.y,lastPinch/m.d);slide(m.x-lastMid.x,m.y-lastMid.y);lastPinch=m.d;lastMid={x:m.x,y:m.y};settle();}
   };
-  const gestureUp=(e:PointerEvent)=>{if(pointers.size>1||performance.now()-glide.last>80)glide.vx=glide.vy=0;pointers.delete(e.pointerId);lastMid=null;lastPinch=0;if(pointers.size===2){const m=middle();lastPinch=m.d;lastMid={x:m.x,y:m.y};}};
+  const gestureUp=(e:PointerEvent)=>{if(pointers.size>1||performance.now()-glide.last>80)glide.vx=glide.vy=0;pointers.delete(e.pointerId);lastMid=null;lastPinch=0;twist=0;twisting=false;if(pointers.size===2){const m=middle();lastPinch=m.d;lastMid={x:m.x,y:m.y};lastAngle=m.a;}};
   const wheel=(e:WheelEvent)=>{e.preventDefault();zoomAt(e.clientX,e.clientY,Math.exp(e.deltaY*.0015));};
-  renderer.domElement.addEventListener('pointerdown',gestureDown);renderer.domElement.addEventListener('pointermove',gestureMove);renderer.domElement.addEventListener('pointerup',gestureUp);renderer.domElement.addEventListener('pointercancel',gestureUp);renderer.domElement.addEventListener('wheel',wheel,{passive:false});
+  renderer.domElement.addEventListener('pointerdown',gestureDown);renderer.domElement.addEventListener('pointermove',gestureMove);renderer.domElement.addEventListener('pointerup',gestureUp);renderer.domElement.addEventListener('pointercancel',gestureUp);renderer.domElement.addEventListener('wheel',wheel,{passive:false});const noMenu=(e:Event)=>e.preventDefault();renderer.domElement.addEventListener('contextmenu',noMenu);
   renderer.domElement.addEventListener('pointerdown',down);renderer.domElement.addEventListener('pointermove',move);renderer.domElement.addEventListener('pointerup',up);renderer.domElement.addEventListener('pointercancel',cancel);
+  // The doctor's highlight is brought into view (2026-11-20): the camera moves to the coloured place, from the front or
+  // the back, close enough that a toe or a small muscle is easy to see; the patient can then zoom and move as usual.
+  const indexById=new Map(atlas.parts.map((p,i)=>[p.id,i]));let lastHighlight='';
+  const frameHighlight=(ids:string[],view:string)=>{
+   const box=new T.Box3();ids.forEach(id=>{const i=indexById.get(id);if(i!==undefined)box.union(bounds[i]);});if(box.isEmpty())return;
+   const center=box.getCenter(new T.Vector3()),size=box.getSize(new T.Vector3()),half=Math.tan(T.MathUtils.degToRad(camera.fov/2));
+   const distance=T.MathUtils.clamp(Math.max(size.y/.4,size.x/.4/camera.aspect)/(2*half),fitDistance*.2,fitDistance);
+   const direction=view==='back'?new T.Vector3(0,.02,-1):new T.Vector3(0,.02,1);
+   controls.target.copy(center);camera.position.copy(center).addScaledVector(direction.normalize(),distance);keepOnScreen();controls.update();dirty=true;
+  };
   const clock=new T.Clock();let lastExtent=-1;
   const animate=()=>{
    if(disposed)return;frame=requestAnimationFrame(animate);const dt=Math.min(clock.getDelta(),.05),s=latest.current;
    if(!pointers.size&&(Math.abs(glide.vx)>.02||Math.abs(glide.vy)>.02)){const ms=dt*1000;if(glide.pan)slide(glide.vx*ms,glide.vy*ms);else turn(glide.vx*ms);settle();const decay=Math.exp(-dt*4);glide.vx*=decay;glide.vy*=decay;}
    const wantedKey=s.visible.join(',');if(wantedKey!==lastWanted){lastWanted=wantedKey;ensureChunks(s.visible);}
-   const changed=lastState?.visible!==s.visible||lastState?.selected!==s.selected||lastState?.isolate!==s.isolate;
+   const changed=lastState?.visible!==s.visible||lastState?.selected!==s.selected||lastState?.highlighted!==s.highlighted||lastState?.isolate!==s.isolate;
    const moving=Math.abs(amount-s.explode)>.0001;
    if(moving){amount=T.MathUtils.damp(amount,s.explode,8,dt);dirty=true;}
    if(changed||moving||lastExtent<0){
-    const visible=new Set(s.visible),selection=new Set(s.selected);
-    const visibleParts=atlas.parts.filter(p=>s.isolate?selection.has(p.id):visible.has(p.system)||selection.has(p.id));
+    const visible=new Set(s.visible),selection=new Set(s.selected),marked=new Set(s.highlighted??[]);
+    const visibleParts=atlas.parts.filter(p=>s.isolate?selection.has(p.id):visible.has(p.system)||selection.has(p.id)||marked.has(p.id));
     const nextLayoutKey=visibleParts.map(p=>p.id).join(',')+':'+camera.aspect.toFixed(3);
     if(nextLayoutKey!==layoutKey){const layout=createExplosionLayout(visibleParts,camera.aspect);packingWidth=layout.width;packingHeight=layout.height;atlas.parts.forEach((p,i)=>{const cell=layout.cells.get(p.id);offsets[i]=cell?new T.Vector3(cell.x,cell.y+.85,0):centers[i].clone();});layoutKey=nextLayoutKey;if(amount>.05&&!s.isolate)fit(s.view,Math.max(0,(amount-.3)/.7));}
 
@@ -179,12 +197,13 @@ export default function AnatomyScene({atlas,state,onSelect,onProgress,onError}:P
      const c=centers[i],destination=offsets[i];let dx=0,dy=0,dz=0;
      if(amount<=.45){const t=amount/.45;const group=SYSTEMS.findIndex(sys=>sys.id===p.system);const angle=group/SYSTEMS.length*Math.PI*2;dx=Math.sin(angle)*t*.48;dy=(c.y-.85)*t*.28;dz=Math.cos(angle)*t*.48;}
      else {const t=(amount-.45)/.55,group=SYSTEMS.findIndex(sys=>sys.id===p.system),angle=group/SYSTEMS.length*Math.PI*2;dx=T.MathUtils.lerp(Math.sin(angle)*.48,destination.x-c.x,t);dy=T.MathUtils.lerp((c.y-.85)*.28,destination.y-c.y,t);dz=T.MathUtils.lerp(Math.cos(angle)*.48,-c.z,t);}
-     const selected=selection.has(p.id);data.set([dx,dy,dz,(s.isolate?selected:visible.has(p.system)||selected)?1:0],i*4);selectedData[i*4]=selected?255:0;
+     const selected=selection.has(p.id),highlighted=marked.has(p.id);data.set([dx,dy,dz,(s.isolate?selected:visible.has(p.system)||selected||highlighted)?1:0],i*4);selectedData[i*4]=selected?255:0;selectedData[i*4+1]=highlighted?255:0;
      markerPositions.set(data[i*4+3]>.5?[c.x+dx,c.y+dy,c.z+dz]:[10000,10000,10000],i*3);const mesh=pickers[i];if(mesh){mesh.position.set(dx,dy,dz);mesh.updateMatrix();mesh.updateMatrixWorld(true);}
     });partTexture.needsUpdate=true;selectionTexture.needsUpdate=true;markerGeometry.attributes.position.needsUpdate=true;lastState=s;lastExtent=amount;dirty=true;
    }
    if(s.reset!==lastReset||(s.view!==lastView&&!isZoomed())){fit(s.view,amount);lastView=s.view;lastReset=s.reset;}
    else if(s.view!==lastView){/* «لف» while zoomed in: the same place, seen from the other side */const offset=camera.position.clone().sub(controls.target).applyAxisAngle(new T.Vector3(0,1,0),Math.PI);camera.position.copy(controls.target).add(offset);settle();lastView=s.view;}
+   const highlightKey=(s.highlighted??[]).join(',');if(highlightKey!==lastHighlight){lastHighlight=highlightKey;if(highlightKey)frameHighlight(s.highlighted!,s.view);}
    if(moving&&!s.isolate)fit(amount>.5?'front':s.view,Math.max(0,(amount-.3)/.7));
    const isolateKey=s.isolate?s.selected.join(',')+':'+s.reset+':'+s.inspectorOpen+':'+camera.aspect:'';
    if(isolateKey!==lastIsolate||(s.isolate&&moving)){
