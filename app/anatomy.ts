@@ -26,9 +26,9 @@ export const SYSTEMS: {id:SystemId;name:string;color:string;description:string}[
  {id:'donor-muscle',name:'Leg muscles (donor)',color:'#a8776e',description:'The muscles of the hip, thigh, and lower leg, from a second woman: the Visible Human Female, segmented by Andreassen and colleagues. This reference body’s own source models almost no muscle, and these fill that gap. They are fitted to this body’s own hip bone, femur, patella, tibia, and fibula, but they are another person’s muscles and carry her build, not this one’s.'},
  {id:'connective',name:'Connective tissue',color:'#aec3bb',description:'Cartilage, ligaments, and other connective tissues support, connect, and separate structures. Their roles include stabilizing joints and distributing mechanical loads.'},
 ];
-export interface Part {id:string;name:string;conceptId:string;system:SystemId;chunk:number;positions:number;normals:number;indices:number;vertexCount:number;indexCount:number;bounds:[number[],number[]]}
+export interface Part {id:string;name:string;conceptId:string;system:SystemId;chunk:number;positions:number;normals:number;indices:number;vertexCount:number;indexCount:number;bounds:[number[],number[]];packed?:{vertices:number;v:[number,number];n:[number,number];i:[number,number]}}
 export interface Concept {id:string;name:string;elements:string[]}
-export interface Atlas {version:string;sex?:Sex;source?:string;scope?:string;parts:Part[];concepts:Concept[];chunks:{url:string;bytes:number;gzip?:string;gzipBytes?:number}[];triangles:number}
+export interface Atlas {version:string;format?:string;sex?:Sex;source?:string;scope?:string;parts:Part[];concepts:Concept[];chunks:{url:string;bytes:number;gzip?:string;gzipBytes?:number;group?:number}[];triangles:number}
 /** Each reference body is a separate dataset with its own scope and credits. */
 export interface Edition {sex:Sex;label:string;caption:string;manifest:string;dataset:string;summary:string;limits:string;credit:string;licence:string;download:string;publication?:string;suggestions:string[];hidden:SystemId[]}
 export const EDITIONS:Edition[] = [
@@ -56,7 +56,7 @@ export const edition = (sex:Sex) => EDITIONS.find(e=>e.sex===sex) ?? EDITIONS[0]
  * DEFAULT_VISIBLE for every body. They stay listed, so a reader can switch them on. */
 export const defaultVisible = (sex:Sex):SystemId[] => {const off=edition(sex).hidden;return DEFAULT_VISIBLE.filter(id=>!off.includes(id));};
 export type View = 'three-quarter'|'front'|'back'|'side';
-export interface SceneState {inspectorOpen?:boolean;explode:number;visible:SystemId[];selected:string[];highlighted?:string[];highlightedAreas?:{area:string;side:string}[];isolate:boolean;view:View;rotate:boolean;reset:number}
+export interface SceneState {inspectorOpen?:boolean;explode:number;visible:SystemId[];selected:string[];highlighted?:string[];highlightedAreas?:{area:string;side:string}[];extra?:string[];isolate:boolean;view:View;rotate:boolean;reset:number}
 export const DEFAULT_VISIBLE:SystemId[] = ['cardiac','sensory','skeletal','muscular','arterial','venous','nervous','brain','respiratory','digestive','urinary','lymphatic','endocrine','reproductive','connective'];
 export const EXPLANATIONS:Record<string,string> = {
  'heart':'A muscular pump in the chest. Its right side sends blood to the lungs; its left side sends blood through the systemic circulation.',

@@ -23,19 +23,34 @@ const savedSex = (): Sex => {
   }
 };
 
-// Two simple views for patients (owner request 2026-11-17): «العضلات» (muscles with the skeleton, tendons, eyes and
-// ears; for the female model also its skin, borrowed bones and leg muscles) and «الأعضاء الداخلية» (the organs).
-type Layer = 'muscles' | 'organs';
+// Five simple views (owner request 2026-11-22; two until then): each button shows what its name says.
+// «العضلات» opens first: the muscles over the skeleton, with tendons, eyes and ears. «العظام»: the skeleton with its
+// cartilage and ligaments. «الأعضاء الداخلية»: heart, lungs (airways), stomach and gut, liver, kidneys and bladder,
+// glands, spleen and brain. «الأوعية والأعصاب»: arteries, veins, the heart they leave from, and the nerves the
+// source has (mainly the brain, the eyes and the face). «كل شي»: everything, the reproductive organs and skin too.
+type Layer = 'muscles' | 'bones' | 'organs' | 'vessels' | 'all';
+const LAYER_ORDER: Layer[] = ['muscles', 'bones', 'organs', 'vessels', 'all'];
+const LAYER_NAMES: Record<Layer, string> = { muscles: 'العضلات', bones: 'العظام', organs: 'الأعضاء الداخلية', vessels: 'الأوعية والأعصاب', all: 'كل شي' };
+const ALL_SYSTEMS: SystemId[] = ['muscular', 'skeletal', 'connective', 'sensory', 'cardiac', 'respiratory', 'digestive', 'urinary', 'endocrine', 'nervous', 'brain', 'lymphatic', 'arterial', 'venous', 'reproductive', 'integumentary'];
 const LAYERS: Record<Sex, Record<Layer, SystemId[]>> = {
   male: {
     muscles: ['muscular', 'skeletal', 'connective', 'sensory'],
+    bones: ['skeletal', 'connective'],
     organs: ['cardiac', 'respiratory', 'digestive', 'urinary', 'endocrine', 'nervous', 'brain', 'lymphatic'],
+    vessels: ['arterial', 'venous', 'nervous', 'cardiac'],
+    all: ALL_SYSTEMS,
   },
   female: {
     muscles: ['muscular', 'donor-muscle', 'skeletal', 'borrowed', 'connective', 'sensory', 'integumentary'],
+    bones: ['skeletal', 'borrowed', 'connective'],
     organs: ['cardiac', 'respiratory', 'digestive', 'urinary', 'endocrine', 'nervous', 'brain', 'lymphatic'],
+    vessels: ['arterial', 'venous', 'nervous', 'cardiac'],
+    all: [...ALL_SYSTEMS, 'donor-muscle', 'borrowed', 'pregnancy'],
   },
 };
+// The male source has no outer surface for the liver and lungs: they are its vessels, ducts and airways. Those vessels
+// belong to the organs view too, so the liver and the lungs show there.
+const ORGAN_CONCEPTS = new Set(['liver', 'left lung', 'right lung', 'heart', 'left kidney', 'right kidney', 'spleen', 'pancreas', 'stomach', 'gallbladder']);
 
 const initial = (sex: Sex): SceneState => ({
   explode: 0,
@@ -142,6 +157,12 @@ export default function Home() {
     () => new Map(atlas?.parts.map(p => [p.id, p])),
     [atlas]
   );
+  // The vessels inside the organs that the source models only that way (the liver, the lungs): shown in the organs view.
+  const organExtras = useMemo(() => {
+    if (!atlas || sex !== 'male') return new Set<string>();
+    return new Set(atlas.concepts.filter(c => ORGAN_CONCEPTS.has(c.name.toLowerCase())).flatMap(c => c.elements));
+  }, [atlas, sex]);
+  const extraFor = (view: Layer) => (view === 'organs' ? organExtras : new Set<string>());
   const idsByName = useMemo(
     () => new Map(atlas?.parts.map(p => [p.name.toLowerCase(), p.id])),
     [atlas]
@@ -185,7 +206,8 @@ export default function Home() {
         // By area, on either model: the parts of that area and side.
         ids = atlas.parts.filter(p => {
           const area = map[p.id];
-          if (!area || VESSEL.test(p.name) || p.system === 'integumentary') return false;
+          // Vessels are left out, except the ones the liver and the lungs are made of in this source.
+          if (!area || (VESSEL.test(p.name) && !organExtras.has(p.id)) || p.system === 'integumentary') return false;
           const centreX = (p.bounds[0][0] + p.bounds[1][0]) / 2;
           const side = sideOfName(p.name) ?? (centreX > 0.03 ? 'left' : centreX < -0.03 ? 'right' : null);
           return highlight.regions.some(r => r.area === area && (r.side === 'both' || !side || r.side === side));
@@ -202,27 +224,31 @@ export default function Home() {
         setState(current => ({ ...current, highlighted: [], highlightedAreas: [] }));
         return;
       }
-      // The view that holds the place: the muscles view when it has a muscle, bone or tendon the patient can press,
-      // or a skin area; the organs view for an organ only (the liver).
-      const systems = ids.map(id => parts.get(id)?.system);
-      const organs = !areas.length && !systems.some(system => LAYERS[sex].muscles.includes(system as SystemId));
-      const nextLayer: Layer = organs ? 'organs' : 'muscles';
-      // In the muscles view only what that view shows is coloured (not the folds of the gut behind the belly wall).
-      if (!organs) ids = ids.filter(id => LAYERS[sex].muscles.includes(parts.get(id)?.system as SystemId));
+      // The view that holds the place (changed 2026-11-22, five views): the view the patient is in when it shows the
+      // place; otherwise the muscles view when the place has a muscle, bone or tendon the patient can press (or a skin
+      // area), then the organs, the bones, the vessels, and «كل شي» for anything else. Only what that view shows is
+      // coloured (not the folds of the gut behind the belly wall).
+      const shows = (view: Layer, id: string) => LAYERS[sex][view].includes(parts.get(id)?.system as SystemId) || extraFor(view).has(id);
+      const candidates: Layer[] = [layer, 'muscles', 'organs', 'bones', 'vessels'];
+      const nextLayer: Layer = (areas.length ? 'muscles' : null)
+        ?? candidates.find(view => (view === layer ? ids.every(id => shows(view, id)) : ids.some(id => shows(view, id))) && ids.length > 0)
+        ?? 'all';
+      ids = ids.filter(id => shows(nextLayer, id));
       if (nextLayer !== layer) setLayer(nextLayer);
       // Front or back of the body.
       const zOf = (id: string) => { const b = parts.get(id)!.bounds; return (b[0][2] + b[1][2]) / 2; };
-      const layerIds = atlas.parts.filter(p => LAYERS[sex][nextLayer].includes(p.system as SystemId)).map(p => p.id);
+      const layerIds = atlas.parts.filter(p => shows(nextLayer, p.id)).map(p => p.id);
       const middle = layerIds.reduce((sum, id) => sum + zOf(id), 0) / Math.max(1, layerIds.length);
-      const BACK = new Set(['upper_back', 'lower_back', 'buttock', 'calf', 'knee_back', 'thigh_back', 'heel']);
-      const back = ids.length
+      const BACK = new Set(['upper_back', 'lower_back', 'buttock', 'calf', 'knee_back', 'thigh_back', 'heel', 'kidney', 'adrenal']);
+      // The kidneys sit behind the gut: they are shown from the back.
+      const back = highlight.regions.length && highlight.regions.every(r => BACK.has(r.area)) ? true : ids.length
         ? ids.reduce((sum, id) => sum + zOf(id), 0) / ids.length < middle - .03
         : areas.every(r => BACK.has(r.area));
-      setState(current => ({ ...current, highlighted: ids, highlightedAreas: areas, visible: LAYERS[sex][nextLayer], view: back ? 'back' : 'front', reset: current.reset + 1 }));
+      setState(current => ({ ...current, highlighted: ids, highlightedAreas: areas, visible: LAYERS[sex][nextLayer], extra: [...extraFor(nextLayer)], view: back ? 'back' : 'front', reset: current.reset + 1 }));
     };
     window.addEventListener('message', onMessage);
     return () => window.removeEventListener('message', onMessage);
-  }, [atlas, parts, idsByName, layer, regions, sex]);
+  }, [atlas, parts, idsByName, layer, regions, sex, organExtras]);
 
   // A tap colours a part and keeps the others (2026-11-20); a tap on a coloured part un-colours only that one. The
   // same for an area of the female model's skin.
@@ -242,7 +268,7 @@ export default function Home() {
     setLayer(next);
     // The organs' extra parts load only now. Changed 2026-11-20: the selected parts stay selected (and stay visible) in
     // the other view, so the patient can choose toes and then an organ.
-    setState(current => ({ ...current, visible: LAYERS[sex][next], reset: current.reset + 1 }));
+    setState(current => ({ ...current, visible: LAYERS[sex][next], extra: [...extraFor(next)], reset: current.reset + 1 }));
   };
   // Male or female: the other model loads; the selection and highlight start empty (their parts are different).
   const chooseSex = (next: Sex) => {
@@ -272,9 +298,10 @@ export default function Home() {
 
       <div className="atlas-bar">
         <div className="atlas-stack">
-          <div className="atlas-layers" role="group" aria-label="العرض">
-            <button type="button" aria-pressed={layer === 'muscles'} onClick={() => chooseLayer('muscles')}>العضلات</button>
-            <button type="button" aria-pressed={layer === 'organs'} onClick={() => chooseLayer('organs')}>الأعضاء الداخلية</button>
+          <div className="atlas-layers atlas-views" role="group" aria-label="العرض">
+            {LAYER_ORDER.map(view => (
+              <button key={view} type="button" aria-pressed={layer === view} onClick={() => chooseLayer(view)}>{LAYER_NAMES[view]}</button>
+            ))}
           </div>
           {FEMALE_READY && (
             <div className="atlas-layers atlas-sex" role="group" aria-label="ذكر أو أنثى">
@@ -304,7 +331,7 @@ export default function Home() {
       {(!atlas || progress < 100) && !error && (
         <div className="atlas-loading" role="status">
           <i aria-hidden="true" />
-          <span>جاري التحميل…</span>
+          <span>جاري التحميل… {atlas ? `${progress}%` : ''}</span>
         </div>
       )}
 

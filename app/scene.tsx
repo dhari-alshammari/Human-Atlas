@@ -6,6 +6,7 @@ import {mergeGeometries} from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import {createExplosionLayout} from './explosion-layout';
 import {decodeModelResponse} from './model-download';
 import {PointerTap} from './pointer-tap';
+import {MeshoptDecoder} from 'meshoptimizer/decoder';
 import {SYSTEMS,type Atlas,type SceneState,type Sex} from './anatomy';
 import {areaAt,parseSurface,sideAt,sideFits,surfaceId} from './body-surface';
 interface Props {atlas:Atlas;sex:Sex;state:SceneState;onSelect:(id:string)=>void;onProgress:(n:number)=>void;onError:(s:string)=>void}
@@ -71,17 +72,32 @@ export default function AnatomyScene({atlas,sex,state,onSelect,onProgress,onErro
   };
   // Chunks load when a visible system needs them (2026-11-17): the muscles view first; the internal organs' extra
   // chunks only when that view is chosen. Parts, names and picking are unchanged.
+  const indexById=new Map(atlas.parts.map((p,i)=>[p.id,i]));
   const loadedChunks=new Set<number>(),requested=new Set<number>();let neededChunks:number[]=[];
   const chunkSystems=atlas.chunks.map((_,ci)=>new Set(atlas.parts.filter(p=>p.chunk===ci).map(p=>p.system as string)));
   const reportProgress=()=>{const done=neededChunks.filter(ci=>loadedChunks.has(ci)).length;onProgress(neededChunks.length?Math.round(done/neededChunks.length*100):100);ready=done===neededChunks.length&&loadedChunks.size>0;dirty=true;};
   const loadChunk=async(ci:number)=>{
+   if(atlas.format==='meshopt-1')await MeshoptDecoder.ready;
    const chunk=atlas.chunks[ci],compressed=!!chunk.gzip&&typeof DecompressionStream!=='undefined';const response=await fetch(compressed?chunk.gzip!:chunk.url,{signal:abort.signal});const buffer=await decodeModelResponse(response,chunk.bytes,compressed);if(disposed)return;
    const groups=new Map<string,T.BufferGeometry[]>();
    atlas.parts.forEach((p,i)=>{
     if(p.chunk!==ci)return;
-    const g=new T.BufferGeometry();g.setAttribute('position',new T.BufferAttribute(new Float32Array(buffer,p.positions,p.vertexCount*3),3));
-    // GPU normalized signed-short normals keep the complete atlas compact in memory.
-    g.setAttribute('normal',new T.BufferAttribute(new Int16Array(buffer,p.normals,p.vertexCount*3),3,true));g.setIndex(new T.BufferAttribute(new Uint32Array(buffer,p.indices,p.indexCount),1));
+    const g=new T.BufferGeometry();
+    if(p.packed){
+     // The packed male model (2026-11-22, scripts/pack-models.mjs): meshoptimizer's codec, positions as 16-bit steps
+     // inside the part's box, normals as 8-bit directions.
+     const {vertices:n,v,n:nm,i:ix}=p.packed,bytes=new Uint8Array(buffer),[min,max]=p.bounds;
+     const q=new Uint16Array(n*4);MeshoptDecoder.decodeGltfBuffer(new Uint8Array(q.buffer),n,8,bytes.subarray(v[0],v[0]+v[1]),'ATTRIBUTES');
+     const r=new Int8Array(n*4);MeshoptDecoder.decodeGltfBuffer(new Uint8Array(r.buffer),n,4,bytes.subarray(nm[0],nm[0]+nm[1]),'ATTRIBUTES');
+     const idx=new Uint32Array(p.indexCount);MeshoptDecoder.decodeGltfBuffer(new Uint8Array(idx.buffer),p.indexCount,4,bytes.subarray(ix[0],ix[0]+ix[1]),'TRIANGLES');
+     const pos=new Float32Array(n*3),nor=new Int8Array(n*3);
+     for(let k=0;k<n;k++)for(let c=0;c<3;c++){pos[k*3+c]=min[c]+q[k*4+c]/65535*(max[c]-min[c]);nor[k*3+c]=r[k*4+c];}
+     g.setAttribute('position',new T.BufferAttribute(pos,3));g.setAttribute('normal',new T.BufferAttribute(nor,3,true));g.setIndex(new T.BufferAttribute(idx,1));
+    }else{
+     g.setAttribute('position',new T.BufferAttribute(new Float32Array(buffer,p.positions,p.vertexCount*3),3));
+     // GPU normalized signed-short normals keep the complete atlas compact in memory.
+     g.setAttribute('normal',new T.BufferAttribute(new Int16Array(buffer,p.normals,p.vertexCount*3),3,true));g.setIndex(new T.BufferAttribute(new Uint32Array(buffer,p.indices,p.indexCount),1));
+    }
     g.boundingBox=bounds[i].clone();g.computeBoundingSphere();const pick=new T.Mesh(g);pick.matrixAutoUpdate=false;pickers[i]=pick;geometries.push(g);
     g.setAttribute('partIndex',new T.BufferAttribute(new Float32Array(p.vertexCount).fill(i),1));
     const list=groups.get(p.system)??[];list.push(g);groups.set(p.system,list);
@@ -95,18 +111,19 @@ export default function AnatomyScene({atlas,sex,state,onSelect,onProgress,onErro
     const mesh=new T.Mesh(geometry,mats.get(system as never));mesh.frustumCulled=false;scene.add(mesh);});
    lastState=null;loadedChunks.add(ci);reportProgress();
   };
-  const ensureChunks=(systems:string[])=>{
-   const wanted=new Set(systems);neededChunks=atlas.chunks.map((_,ci)=>ci).filter(ci=>[...chunkSystems[ci]].some(id=>wanted.has(id)));
+  const ensureChunks=(systems:string[],extra:string[]=[])=>{
+   const wanted=new Set(systems),extraChunks=new Set(extra.map(id=>atlas.parts[indexById.get(id)??-1]?.chunk).filter(ci=>ci!==undefined));
+   neededChunks=atlas.chunks.map((_,ci)=>ci).filter(ci=>extraChunks.has(ci)||[...chunkSystems[ci]].some(id=>wanted.has(id)));
    const queue=neededChunks.filter(ci=>!requested.has(ci));queue.forEach(ci=>requested.add(ci));reportProgress();if(!queue.length)return;
    (async()=>{try{let cursor=0;await Promise.all(Array.from({length:3},async()=>{while(cursor<queue.length){const i=queue[cursor++];await loadChunk(i);}}));}catch(e){if(!disposed)onError(e instanceof Error?e.message:'Could not load the anatomy.');}})();
   };
-  let lastWanted='';
+  let lastWanted='',preloading=false;
   // The whole body, centred, below the small top bar (2026-11-17): the earlier layout reserved room for panels.
   // The frame is the parts of the chosen view (the organs view is smaller than the whole body).
   const bodyBox=new T.Box3(),bodyCenter=new T.Vector3(),bodySize=new T.Vector3();let fitDistance=4;
   const frameVisible=()=>{const shown=new Set<string>(latest.current.visible);bodyBox.makeEmpty();atlas.parts.forEach((p,i)=>{if(shown.has(p.system))bodyBox.union(bounds[i]);});if(bodyBox.isEmpty())bounds.forEach(b=>bodyBox.union(b));bodyBox.getCenter(bodyCenter);bodyBox.getSize(bodySize);};
   const fit=(view:string,extent=0)=>{
-   if(extent<=.1){frameVisible();const top=64,bottom=16,h=Math.max(160,el.clientHeight-top-bottom),half=Math.tan(T.MathUtils.degToRad(camera.fov/2));
+   if(extent<=.1){frameVisible();const top=Math.max(64,(document.querySelector('.atlas-bar')?.getBoundingClientRect().bottom??56)+8),bottom=16,h=Math.max(160,el.clientHeight-top-bottom),half=Math.tan(T.MathUtils.degToRad(camera.fov/2));
     const distance=Math.max(bodySize.y*1.06*el.clientHeight/h,bodySize.x*1.1/camera.aspect)/(2*half);
     const direction=view==='back'?new T.Vector3(0,.02,-1):new T.Vector3(0,.02,1);
     camera.clearViewOffset();camera.setViewOffset(el.clientWidth,el.clientHeight,0,-(top-bottom)/2,el.clientWidth,el.clientHeight);
@@ -125,11 +142,15 @@ export default function AnatomyScene({atlas,sex,state,onSelect,onProgress,onErro
   const up=(e:PointerEvent)=>{
    const validTap=tap.up(e.pointerId,e.clientX,e.clientY);if(!validTap||!ready)return;const rect=renderer.domElement.getBoundingClientRect();pointer.set((e.clientX-rect.left)/rect.width*2-1,-(e.clientY-rect.top)/rect.height*2+1);raycaster.setFromCamera(pointer,camera);
    let nearest=Infinity,found=-1;const hasSolid=atlas.parts.some((p,i)=>p.system!=='integumentary'&&data[i*4+3]>.5);
-   pickers.forEach((mesh,i)=>{if(!mesh||data[i*4+3]<.5||(hasSolid&&atlas.parts[i].system==='integumentary'))return;worldBox.copy(bounds[i]).translate(mesh.position);if(!raycaster.ray.intersectBox(worldBox,hitPoint))return;const hits=raycaster.intersectObject(mesh,false);if(hits[0]&&hits[0].distance<nearest){nearest=hits[0].distance;found=i;}});
+   // A tap chooses what suits the view (2026-11-22): outside the vessels view an artery or vein counts as 2 cm further
+   // away, so in «كل شي» the muscle under a small vein is chosen; in the vessels view nothing is held back.
+   const visibleNow=latest.current.visible,vesselView=!visibleNow.includes('muscular')&&!visibleNow.includes('digestive')&&!visibleNow.includes('skeletal');
+   const extraDistance=(i:number)=>!vesselView&&(atlas.parts[i].system==='arterial'||atlas.parts[i].system==='venous')?.02:0;
+   pickers.forEach((mesh,i)=>{if(!mesh||data[i*4+3]<.5||(hasSolid&&atlas.parts[i].system==='integumentary'))return;worldBox.copy(bounds[i]).translate(mesh.position);if(!raycaster.ray.intersectBox(worldBox,hitPoint))return;const hits=raycaster.intersectObject(mesh,false);if(hits[0]&&hits[0].distance+extraDistance(i)<nearest){nearest=hits[0].distance+extraDistance(i);found=i;}});
    // The visible skin (female model): a tap that lands on skin with no bone or muscle just under it (within 2.5 cm)
    // selects the area of the skin where it landed, so a tap on the belly is the belly, not the spine behind it.
    const skin=skinIndex>=0?pickers[skinIndex]:undefined;
-   if(skin&&data[skinIndex*4+3]>.5&&amount<.1){const hits=raycaster.intersectObject(skin,false);if(hits[0]&&(found<0||nearest-hits[0].distance>.025)){const p=hits[0].point;hover.hidden=true;select.current(surfaceId(areaAt(sex,[p.x,p.y,p.z]),sideAt([p.x,p.y,p.z])));return;}}
+   if(skin&&sex==='female'&&data[skinIndex*4+3]>.5&&amount<.1){const hits=raycaster.intersectObject(skin,false);if(hits[0]&&(found<0||nearest-hits[0].distance>.025)){const p=hits[0].point;hover.hidden=true;select.current(surfaceId(areaAt(sex,[p.x,p.y,p.z]),sideAt([p.x,p.y,p.z])));return;}}
    if(found<0&&amount>.45)found=findTarget(e.clientX-rect.left,e.clientY-rect.top,e.pointerType==='touch'?24:16);if(found>=0){hover.hidden=true;select.current(atlas.parts[found].id);}
   };
   // Zoom on the exact spot under the fingers or the mouse (2026-11-17): the camera and the orbit centre move towards
@@ -189,7 +210,7 @@ export default function AnatomyScene({atlas,sex,state,onSelect,onProgress,onErro
   // The doctor's highlight is brought into view (2026-11-20): the camera moves to the coloured place, from the front or
   // the back, close enough that a toe or a small muscle is easy to see; the patient can then zoom and move as usual.
   // Changed 2026-11-22: a coloured area of the skin (female model) counts too.
-  const indexById=new Map(atlas.parts.map((p,i)=>[p.id,i]));let lastHighlight='';
+  let lastHighlight='';
   const frameHighlight=(ids:string[],areas:{area:string;side:string}[],view:string)=>{
    const box=new T.Box3();ids.forEach(id=>{const i=indexById.get(id);if(i!==undefined)box.union(bounds[i]);});
    const corner=new T.Vector3();for(const vertex of skinVertices)if(areas.some(w=>w.area===vertex.area&&sideFits(w.side,vertex.side)))box.expandByPoint(corner.set(vertex.x,vertex.y,vertex.z));
@@ -203,13 +224,17 @@ export default function AnatomyScene({atlas,sex,state,onSelect,onProgress,onErro
   const animate=()=>{
    if(disposed)return;frame=requestAnimationFrame(animate);const dt=Math.min(clock.getDelta(),.05),s=latest.current;
    if(!pointers.size&&(Math.abs(glide.vx)>.02||Math.abs(glide.vy)>.02)){const ms=dt*1000;if(glide.pan)slide(glide.vx*ms,glide.vy*ms);else turn(glide.vx*ms);settle();const decay=Math.exp(-dt*4);glide.vx*=decay;glide.vy*=decay;}
-   const wantedKey=s.visible.join(',');if(wantedKey!==lastWanted){lastWanted=wantedKey;ensureChunks(s.visible);}
-   const changed=lastState?.visible!==s.visible||lastState?.selected!==s.selected||lastState?.highlighted!==s.highlighted||lastState?.isolate!==s.isolate;
+   const wantedKey=s.visible.join(',')+':'+(s.extra??[]).length;if(wantedKey!==lastWanted){lastWanted=wantedKey;ensureChunks(s.visible,s.extra??[]);}
+   // Once the first view is on screen, the other views' files load quietly behind it (2026-11-22), two at a time, so
+   // any button then opens at once. They are kept by the browser (vercel.json), so a second visit is quick too.
+   if(ready&&!preloading){preloading=true;setTimeout(()=>{const rest=atlas.chunks.map((_,ci)=>ci).filter(ci=>!requested.has(ci));rest.forEach(ci=>requested.add(ci));let cursor=0;
+    Promise.all(Array.from({length:2},async()=>{while(cursor<rest.length&&!disposed){const ci=rest[cursor++];try{await loadChunk(ci);}catch{requested.delete(ci);}}})).catch(()=>{});},800);}
+   const changed=lastState?.visible!==s.visible||lastState?.extra!==s.extra||lastState?.selected!==s.selected||lastState?.highlighted!==s.highlighted||lastState?.isolate!==s.isolate;
    const moving=Math.abs(amount-s.explode)>.0001;
    if(moving){amount=T.MathUtils.damp(amount,s.explode,8,dt);dirty=true;}
    if(changed||moving||lastExtent<0){
-    const visible=new Set(s.visible),selection=new Set(s.selected),marked=new Set(s.highlighted??[]);
-    const visibleParts=atlas.parts.filter(p=>s.isolate?selection.has(p.id):visible.has(p.system)||selection.has(p.id)||marked.has(p.id));
+    const visible=new Set(s.visible),selection=new Set(s.selected),marked=new Set(s.highlighted??[]),extra=new Set(s.extra??[]);
+    const visibleParts=atlas.parts.filter(p=>s.isolate?selection.has(p.id):visible.has(p.system)||extra.has(p.id)||selection.has(p.id)||marked.has(p.id));
     const nextLayoutKey=visibleParts.map(p=>p.id).join(',')+':'+camera.aspect.toFixed(3);
     if(nextLayoutKey!==layoutKey){const layout=createExplosionLayout(visibleParts,camera.aspect);packingWidth=layout.width;packingHeight=layout.height;atlas.parts.forEach((p,i)=>{const cell=layout.cells.get(p.id);offsets[i]=cell?new T.Vector3(cell.x,cell.y+.85,0):centers[i].clone();});layoutKey=nextLayoutKey;if(amount>.05&&!s.isolate)fit(s.view,Math.max(0,(amount-.3)/.7));}
 
@@ -217,7 +242,7 @@ export default function AnatomyScene({atlas,sex,state,onSelect,onProgress,onErro
      const c=centers[i],destination=offsets[i];let dx=0,dy=0,dz=0;
      if(amount<=.45){const t=amount/.45;const group=SYSTEMS.findIndex(sys=>sys.id===p.system);const angle=group/SYSTEMS.length*Math.PI*2;dx=Math.sin(angle)*t*.48;dy=(c.y-.85)*t*.28;dz=Math.cos(angle)*t*.48;}
      else {const t=(amount-.45)/.55,group=SYSTEMS.findIndex(sys=>sys.id===p.system),angle=group/SYSTEMS.length*Math.PI*2;dx=T.MathUtils.lerp(Math.sin(angle)*.48,destination.x-c.x,t);dy=T.MathUtils.lerp((c.y-.85)*.28,destination.y-c.y,t);dz=T.MathUtils.lerp(Math.cos(angle)*.48,-c.z,t);}
-     const selected=selection.has(p.id),highlighted=marked.has(p.id);data.set([dx,dy,dz,(s.isolate?selected:visible.has(p.system)||selected||highlighted)?1:0],i*4);selectedData[i*4]=selected?255:0;selectedData[i*4+1]=highlighted?255:0;
+     const selected=selection.has(p.id),highlighted=marked.has(p.id);data.set([dx,dy,dz,(s.isolate?selected:visible.has(p.system)||extra.has(p.id)||selected||highlighted)?1:0],i*4);selectedData[i*4]=selected?255:0;selectedData[i*4+1]=highlighted?255:0;
      markerPositions.set(data[i*4+3]>.5?[c.x+dx,c.y+dy,c.z+dz]:[10000,10000,10000],i*3);const mesh=pickers[i];if(mesh){mesh.position.set(dx,dy,dz);mesh.updateMatrix();mesh.updateMatrixWorld(true);}
     });partTexture.needsUpdate=true;selectionTexture.needsUpdate=true;markerGeometry.attributes.position.needsUpdate=true;lastState=s;lastExtent=amount;dirty=true;
    }

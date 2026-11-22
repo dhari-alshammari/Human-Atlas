@@ -4,7 +4,11 @@
 /assets/*
   Cache-Control: public, max-age=31536000, immutable
 
-# Geometry keeps the same names across rebuilds, so it must stay revalidatable:
+# The packed male model (2026-11-22) has a content hash in every file name, so it can be kept for a year.
+/models/body-*-*-*.bin.gz
+  Cache-Control: public, max-age=31536000, immutable
+
+# Other geometry keeps the same names across rebuilds, so it must stay revalidatable:
 # a day from cache, then served stale while the new copy is fetched behind it.
 /models/*
   Cache-Control: public, max-age=86400, stale-while-revalidate=604800
