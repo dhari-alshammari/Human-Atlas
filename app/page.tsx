@@ -10,10 +10,14 @@ import { parseSurface, surfaceName } from './body-surface';
 // has the skin, organs and female organs, its own spine, pelvis and knees, bones borrowed from the male model, and
 // the leg muscles of a second woman; it has no muscles of the trunk or arms. A tap on its skin anywhere selects that
 // area of the body.
+// Changed 2026-11-22 (owner decision): the current female model is not good enough (no muscles of the trunk or arms),
+// so the «ذكر / أنثى» choice is hidden and only the male model shows, until a complete female model is bought and
+// added. Set this to true when it is in place; everything else for the female model stays ready.
+const FEMALE_READY = false;
 const SEX_KEY = 'human-atlas-sex';
 const savedSex = (): Sex => {
   try {
-    return localStorage.getItem(SEX_KEY) === 'female' ? 'female' : 'male';
+    return FEMALE_READY && localStorage.getItem(SEX_KEY) === 'female' ? 'female' : 'male';
   } catch {
     return 'male';
   }
@@ -272,10 +276,12 @@ export default function Home() {
             <button type="button" aria-pressed={layer === 'muscles'} onClick={() => chooseLayer('muscles')}>العضلات</button>
             <button type="button" aria-pressed={layer === 'organs'} onClick={() => chooseLayer('organs')}>الأعضاء الداخلية</button>
           </div>
-          <div className="atlas-layers atlas-sex" role="group" aria-label="ذكر أو أنثى">
-            <button type="button" aria-pressed={sex === 'male'} onClick={() => chooseSex('male')}>ذكر</button>
-            <button type="button" aria-pressed={sex === 'female'} onClick={() => chooseSex('female')}>أنثى</button>
-          </div>
+          {FEMALE_READY && (
+            <div className="atlas-layers atlas-sex" role="group" aria-label="ذكر أو أنثى">
+              <button type="button" aria-pressed={sex === 'male'} onClick={() => chooseSex('male')}>ذكر</button>
+              <button type="button" aria-pressed={sex === 'female'} onClick={() => chooseSex('female')}>أنثى</button>
+            </div>
+          )}
         </div>
         <div className="atlas-layers atlas-tools" role="group" aria-label="التحكم">
           <button type="button" onClick={flip} aria-label="لف الجسم أمام أو خلف">
