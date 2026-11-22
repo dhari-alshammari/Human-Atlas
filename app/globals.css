@@ -123,3 +123,7 @@ h1 .edition{font-family:inherit;font-weight:500;font-size:10px;letter-spacing:.0
 .atlas-error{color:#b91c1c;max-width:90vw}
 @keyframes atlas-spin{to{transform:rotate(360deg)}}
 @media(max-width:400px){.atlas-layers button{padding:0 9px;font-size:14px}.atlas-tools button svg{display:none}}
+/* Male or female under the views (2026-11-22): a second small row on the same side. */
+.atlas-stack{display:flex;flex-direction:column;align-items:flex-start;gap:6px;pointer-events:none}
+.atlas-stack>*{pointer-events:auto}
+.atlas-sex button{min-height:40px;padding:0 16px}

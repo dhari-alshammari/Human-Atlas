@@ -6,9 +6,10 @@ import {mergeGeometries} from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import {createExplosionLayout} from './explosion-layout';
 import {decodeModelResponse} from './model-download';
 import {PointerTap} from './pointer-tap';
-import {SYSTEMS,type Atlas,type SceneState} from './anatomy';
-interface Props {atlas:Atlas;state:SceneState;onSelect:(id:string)=>void;onProgress:(n:number)=>void;onError:(s:string)=>void}
-export default function AnatomyScene({atlas,state,onSelect,onProgress,onError}:Props){
+import {SYSTEMS,type Atlas,type SceneState,type Sex} from './anatomy';
+import {areaAt,parseSurface,sideAt,sideFits,surfaceId} from './body-surface';
+interface Props {atlas:Atlas;sex:Sex;state:SceneState;onSelect:(id:string)=>void;onProgress:(n:number)=>void;onError:(s:string)=>void}
+export default function AnatomyScene({atlas,sex,state,onSelect,onProgress,onError}:Props){
  const host=useRef<HTMLDivElement>(null),latest=useRef(state),select=useRef(onSelect);
  latest.current=state;select.current=onSelect;
  useEffect(()=>{
@@ -50,14 +51,24 @@ export default function AnatomyScene({atlas,state,onSelect,onProgress,onError}:P
    const m=new T.MeshStandardMaterial({color:SYSTEMS.find(s=>s.id===system)?.color??'#aebbb8',metalness:.08,roughness:.53,side:T.DoubleSide,transparent:system==='integumentary',opacity:system==='integumentary'?.1:1,depthWrite:system!=='integumentary'});
    m.onBeforeCompile=shader=>{
     shader.uniforms.partState={value:partTexture};shader.uniforms.selectionState={value:selectionTexture};shader.uniforms.stateWidth={value:width};
-    shader.vertexShader='attribute float partIndex; uniform sampler2D partState; uniform sampler2D selectionState; uniform float stateWidth; varying float partVisible; varying float partSelected; varying float partHighlighted;\n'+shader.vertexShader;
-    shader.vertexShader=shader.vertexShader.replace('#include <begin_vertex>','#include <begin_vertex>\nvec2 stateUv = vec2((partIndex + 0.5) / stateWidth, 0.5); vec4 state = texture2D(partState, stateUv); transformed += state.xyz; partVisible = state.w; vec4 marks = texture2D(selectionState, stateUv); partSelected = marks.r; partHighlighted = marks.g;');
-    shader.fragmentShader='varying float partVisible; varying float partSelected; varying float partHighlighted;\n'+shader.fragmentShader;
+    shader.vertexShader='attribute float partIndex; attribute float surfaceMark; varying float vSurface; uniform sampler2D partState; uniform sampler2D selectionState; uniform float stateWidth; varying float partVisible; varying float partSelected; varying float partHighlighted;\n'+shader.vertexShader;
+    shader.vertexShader=shader.vertexShader.replace('#include <begin_vertex>','#include <begin_vertex>\nvec2 stateUv = vec2((partIndex + 0.5) / stateWidth, 0.5); vec4 state = texture2D(partState, stateUv); transformed += state.xyz; partVisible = state.w; vec4 marks = texture2D(selectionState, stateUv); partSelected = marks.r; partHighlighted = marks.g; vSurface = surfaceMark;');
+    shader.fragmentShader='varying float partVisible; varying float partSelected; varying float partHighlighted; varying float vSurface;\n'+shader.fragmentShader;
     shader.fragmentShader=shader.fragmentShader.replace('#include <clipping_planes_fragment>','#include <clipping_planes_fragment>\nif (partVisible < 0.5) discard;');
-    shader.fragmentShader=shader.fragmentShader.replace('#include <color_fragment>','#include <color_fragment>\ndiffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.42, 0.85, 0.78), partSelected * 0.75); diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.56, 0.29, 0.96), partHighlighted * 0.85);');
+    shader.fragmentShader=shader.fragmentShader.replace('#include <color_fragment>','#include <color_fragment>\ndiffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.42, 0.85, 0.78), partSelected * 0.75); diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.56, 0.29, 0.96), partHighlighted * 0.85); if (vSurface > 1.5) { diffuseColor.rgb = vec3(0.56, 0.29, 0.96); diffuseColor.a = max(diffuseColor.a, 0.62); } else if (vSurface > 0.5) { diffuseColor.rgb = vec3(0.3, 0.78, 0.7); diffuseColor.a = max(diffuseColor.a, 0.55); }');
    };materials.push(m);return m;
   };
   const mats=new Map(SYSTEMS.map(s=>[s.id,materialFor(s.id)]));
+  // The skin of the female model is one part (2026-11-22): a tap on it is placed by its position, and an area of it is
+  // coloured vertex by vertex. The male model's skin is never shown.
+  const skinIndex=atlas.parts.findIndex(p=>p.system==='integumentary'&&p.name==='Skin');
+  const skinVertices:{geometry:T.BufferGeometry;v:number;area:string;side:'right'|'left'|null;x:number;y:number;z:number}[]=[];const skinMarks:T.BufferAttribute[]=[];let lastSurfaceKey='';
+  const paintSkin=(s:SceneState)=>{
+   const chosen=s.selected.map(parseSurface).filter((x):x is NonNullable<typeof x>=>Boolean(x)),wanted=s.highlightedAreas??[];
+   const key=JSON.stringify([chosen,wanted,skinVertices.length]);if(key===lastSurfaceKey)return;lastSurfaceKey=key;
+   for(const vertex of skinVertices){const mark=wanted.some(w=>w.area===vertex.area&&sideFits(w.side,vertex.side))?2:chosen.some(c=>c.area===vertex.area&&c.side===vertex.side)?1:0;(vertex.geometry.attributes.surfaceMark as T.BufferAttribute).setX(vertex.v,mark);}
+   skinMarks.forEach(m=>{m.needsUpdate=true;});dirty=true;
+  };
   // Chunks load when a visible system needs them (2026-11-17): the muscles view first; the internal organs' extra
   // chunks only when that view is chosen. Parts, names and picking are unchanged.
   const loadedChunks=new Set<number>(),requested=new Set<number>();let neededChunks:number[]=[];
@@ -75,7 +86,13 @@ export default function AnatomyScene({atlas,state,onSelect,onProgress,onError}:P
     g.setAttribute('partIndex',new T.BufferAttribute(new Float32Array(p.vertexCount).fill(i),1));
     const list=groups.get(p.system)??[];list.push(g);groups.set(p.system,list);
    });
-   groups.forEach((gs,system)=>{const geometry=mergeGeometries(gs,false);if(!geometry)throw new Error('Could not assemble anatomy geometry.');geometries.push(geometry);const mesh=new T.Mesh(geometry,mats.get(system as never));mesh.frustumCulled=false;scene.add(mesh);});
+   groups.forEach((gs,system)=>{const geometry=mergeGeometries(gs,false);if(!geometry)throw new Error('Could not assemble anatomy geometry.');geometries.push(geometry);
+    // Every vertex carries a skin mark (0 none, 1 the patient's selected area, 2 the doctor's highlight); only the skin uses it.
+    const marks=new T.BufferAttribute(new Float32Array(geometry.attributes.position.count),1);geometry.setAttribute('surfaceMark',marks);
+    if(system==='integumentary'&&skinIndex>=0){const index=geometry.attributes.partIndex as T.BufferAttribute,pos=geometry.attributes.position as T.BufferAttribute,point=[0,0,0];
+     for(let v=0;v<pos.count;v++){if(index.getX(v)!==skinIndex)continue;point[0]=pos.getX(v);point[1]=pos.getY(v);point[2]=pos.getZ(v);skinVertices.push({geometry,v,area:areaAt(sex,point),side:sideAt(point),x:point[0],y:point[1],z:point[2]});}
+     skinMarks.push(marks);lastSurfaceKey='';}
+    const mesh=new T.Mesh(geometry,mats.get(system as never));mesh.frustumCulled=false;scene.add(mesh);});
    lastState=null;loadedChunks.add(ci);reportProgress();
   };
   const ensureChunks=(systems:string[])=>{
@@ -109,6 +126,10 @@ export default function AnatomyScene({atlas,state,onSelect,onProgress,onError}:P
    const validTap=tap.up(e.pointerId,e.clientX,e.clientY);if(!validTap||!ready)return;const rect=renderer.domElement.getBoundingClientRect();pointer.set((e.clientX-rect.left)/rect.width*2-1,-(e.clientY-rect.top)/rect.height*2+1);raycaster.setFromCamera(pointer,camera);
    let nearest=Infinity,found=-1;const hasSolid=atlas.parts.some((p,i)=>p.system!=='integumentary'&&data[i*4+3]>.5);
    pickers.forEach((mesh,i)=>{if(!mesh||data[i*4+3]<.5||(hasSolid&&atlas.parts[i].system==='integumentary'))return;worldBox.copy(bounds[i]).translate(mesh.position);if(!raycaster.ray.intersectBox(worldBox,hitPoint))return;const hits=raycaster.intersectObject(mesh,false);if(hits[0]&&hits[0].distance<nearest){nearest=hits[0].distance;found=i;}});
+   // The visible skin (female model): a tap that lands on skin with no bone or muscle just under it (within 2.5 cm)
+   // selects the area of the skin where it landed, so a tap on the belly is the belly, not the spine behind it.
+   const skin=skinIndex>=0?pickers[skinIndex]:undefined;
+   if(skin&&data[skinIndex*4+3]>.5&&amount<.1){const hits=raycaster.intersectObject(skin,false);if(hits[0]&&(found<0||nearest-hits[0].distance>.025)){const p=hits[0].point;hover.hidden=true;select.current(surfaceId(areaAt(sex,[p.x,p.y,p.z]),sideAt([p.x,p.y,p.z])));return;}}
    if(found<0&&amount>.45)found=findTarget(e.clientX-rect.left,e.clientY-rect.top,e.pointerType==='touch'?24:16);if(found>=0){hover.hidden=true;select.current(atlas.parts[found].id);}
   };
   // Zoom on the exact spot under the fingers or the mouse (2026-11-17): the camera and the orbit centre move towards
@@ -136,44 +157,43 @@ export default function AnatomyScene({atlas,state,onSelect,onProgress,onError}:P
   // Our own gestures (2026-11-18), instead of the library's: one finger left/right turns the body on its own
   // axis, one finger up/down slides the view along the body (head to feet); two fingers zoom on the spot between
   // them and slide with them. The body never tilts, and keepOnScreen stops the view at the head and the feet.
-  const pointers=new Map<number,{x:number;y:number}>();let lastPinch=0,lastMid:{x:number;y:number}|null=null,lastAngle=0,twist=0,twisting=false;
+  const pointers=new Map<number,{x:number;y:number}>();let lastPinch=0,lastMid:{x:number;y:number}|null=null;
   const worldPerPixel=()=>2*camera.position.distanceTo(controls.target)*Math.tan(T.MathUtils.degToRad(camera.fov/2))/Math.max(1,el.clientHeight);
   const rightAxis=new T.Vector3(),worldUp=new T.Vector3(0,1,0);
   const slide=(dx:number,dy:number)=>{const k=worldPerPixel();rightAxis.setFromMatrixColumn(camera.matrixWorld,0).setY(0).normalize();const shift=rightAxis.multiplyScalar(-dx*k).addScaledVector(worldUp,dy*k);controls.target.add(shift);camera.position.add(shift);};
-  // Turning around the body's own upright axis (2026-11-20): with two fingers twisted, also when zoomed in, the body
-  // turns like on a turntable and the place in view stays at the same height; keepOnScreen keeps it on the screen.
-  const bodyAxis=new T.Vector3();
-  const turnBody=(angle:number)=>{bodyAxis.set(bodyCenter.x,0,bodyCenter.z);camera.position.sub(bodyAxis).applyAxisAngle(worldUp,angle).add(bodyAxis);controls.target.sub(bodyAxis).applyAxisAngle(worldUp,angle).add(bodyAxis);};
-  const turn=(dx:number)=>{const offset=camera.position.clone().sub(controls.target).applyAxisAngle(worldUp,-dx*2*Math.PI/Math.max(320,el.clientWidth)*.9);camera.position.copy(controls.target).add(offset);};
+  // One finger turns the body around the point in the middle of the view (the orbit centre), which follows the zoom.
+  const turn=(dx:number)=>{const offset=camera.position.clone().sub(controls.target).applyAxisAngle(worldUp,-dx*2*Math.PI/Math.max(320,el.clientWidth)*(isZoomed()?.55:.9));camera.position.copy(controls.target).add(offset);};
   const settle=()=>{keepOnScreen();controls.update();dirty=true;};
-  // Like zooming a photo (2026-11-18): with the whole body on screen one finger turns it; once zoomed in, one finger
-  // moves the picture in every direction and the body does not turn (the «لف» button still turns it).
+  // Zoomed in: «لف» turns around the place in view instead of fitting the whole body again.
   const isZoomed=()=>camera.position.distanceTo(controls.target)<fitDistance*.85;
-  const middle=()=>{const [a,b]=[...pointers.values()];return {x:(a.x+b.x)/2,y:(a.y+b.y)/2,d:Math.hypot(a.x-b.x,a.y-b.y),a:Math.atan2(b.y-a.y,b.x-a.x)};};
+  const middle=()=>{const [a,b]=[...pointers.values()];return {x:(a.x+b.x)/2,y:(a.y+b.y)/2,d:Math.hypot(a.x-b.x,a.y-b.y)};};
   // A quick swipe keeps gliding a little and slows down, like scrolling a page (2026-11-18).
   const glide={vx:0,vy:0,last:0,pan:false};
-  const gestureDown=(e:PointerEvent)=>{glide.vx=glide.vy=0;glide.last=performance.now();pointers.set(e.pointerId,{x:e.clientX,y:e.clientY});try{renderer.domElement.setPointerCapture(e.pointerId);}catch{/* a synthetic pointer */}if(pointers.size===2){const m=middle();lastPinch=m.d;lastMid={x:m.x,y:m.y};lastAngle=m.a;twist=0;twisting=false;}};
+  const gestureDown=(e:PointerEvent)=>{glide.vx=glide.vy=0;glide.last=performance.now();pointers.set(e.pointerId,{x:e.clientX,y:e.clientY});try{renderer.domElement.setPointerCapture(e.pointerId);}catch{/* a synthetic pointer */}if(pointers.size===2){const m=middle();lastPinch=m.d;lastMid={x:m.x,y:m.y};}};
   const gestureMove=(e:PointerEvent)=>{
    const previous=pointers.get(e.pointerId);if(!previous)return;if(e.pointerType==='mouse'&&!e.buttons){pointers.delete(e.pointerId);return;}
    const dx=e.clientX-previous.x,dy=e.clientY-previous.y;pointers.set(e.pointerId,{x:e.clientX,y:e.clientY});
+   // Changed 2026-11-22 (owner request): one finger always turns the body around the point in the middle of the view,
+   // also when zoomed in (zoom on the shoulder and turn around it); two fingers move up, down and sideways and zoom.
+   // With a mouse: drag turns; right-drag or shift-drag moves; the wheel zooms.
    if(pointers.size===1){const now=performance.now(),ms=Math.max(1,now-glide.last);glide.last=now;
-    glide.pan=isZoomed();glide.vx=T.MathUtils.lerp(glide.vx,dx/ms,.5);glide.vy=T.MathUtils.lerp(glide.vy,glide.pan?dy/ms:0,.5);
-    if(glide.pan&&(e.shiftKey||e.buttons===2)){glide.vx=glide.vy=0;turnBody(-dx*2*Math.PI/Math.max(320,el.clientWidth)*.9);settle();return;}if(glide.pan)slide(dx,dy);else turn(dx);settle();return;}
+    glide.pan=e.pointerType==='mouse'&&(e.shiftKey||e.buttons===2);glide.vx=T.MathUtils.lerp(glide.vx,dx/ms,.5);glide.vy=T.MathUtils.lerp(glide.vy,glide.pan?dy/ms:0,.5);
+    if(glide.pan)slide(dx,dy);else turn(dx);settle();return;}
    if(pointers.size===2&&lastMid){const m=middle();
-    // A twist of the two fingers turns the body; a small wobble while pinching does not (it starts after about 10°).
-    let delta=m.a-lastAngle;if(delta>Math.PI)delta-=2*Math.PI;if(delta<-Math.PI)delta+=2*Math.PI;lastAngle=m.a;twist+=delta;if(!twisting&&Math.abs(twist)>.17){twisting=true;delta=twist;}
-    if(twisting)turnBody(-delta);
     if(lastPinch>1&&m.d>1)zoomAt(m.x,m.y,lastPinch/m.d);slide(m.x-lastMid.x,m.y-lastMid.y);lastPinch=m.d;lastMid={x:m.x,y:m.y};settle();}
   };
-  const gestureUp=(e:PointerEvent)=>{if(pointers.size>1||performance.now()-glide.last>80)glide.vx=glide.vy=0;pointers.delete(e.pointerId);lastMid=null;lastPinch=0;twist=0;twisting=false;if(pointers.size===2){const m=middle();lastPinch=m.d;lastMid={x:m.x,y:m.y};lastAngle=m.a;}};
+  const gestureUp=(e:PointerEvent)=>{if(pointers.size>1||performance.now()-glide.last>80)glide.vx=glide.vy=0;pointers.delete(e.pointerId);lastMid=null;lastPinch=0;if(pointers.size===2){const m=middle();lastPinch=m.d;lastMid={x:m.x,y:m.y};}};
   const wheel=(e:WheelEvent)=>{e.preventDefault();zoomAt(e.clientX,e.clientY,Math.exp(e.deltaY*.0015));};
   renderer.domElement.addEventListener('pointerdown',gestureDown);renderer.domElement.addEventListener('pointermove',gestureMove);renderer.domElement.addEventListener('pointerup',gestureUp);renderer.domElement.addEventListener('pointercancel',gestureUp);renderer.domElement.addEventListener('wheel',wheel,{passive:false});const noMenu=(e:Event)=>e.preventDefault();renderer.domElement.addEventListener('contextmenu',noMenu);
   renderer.domElement.addEventListener('pointerdown',down);renderer.domElement.addEventListener('pointermove',move);renderer.domElement.addEventListener('pointerup',up);renderer.domElement.addEventListener('pointercancel',cancel);
   // The doctor's highlight is brought into view (2026-11-20): the camera moves to the coloured place, from the front or
   // the back, close enough that a toe or a small muscle is easy to see; the patient can then zoom and move as usual.
+  // Changed 2026-11-22: a coloured area of the skin (female model) counts too.
   const indexById=new Map(atlas.parts.map((p,i)=>[p.id,i]));let lastHighlight='';
-  const frameHighlight=(ids:string[],view:string)=>{
-   const box=new T.Box3();ids.forEach(id=>{const i=indexById.get(id);if(i!==undefined)box.union(bounds[i]);});if(box.isEmpty())return;
+  const frameHighlight=(ids:string[],areas:{area:string;side:string}[],view:string)=>{
+   const box=new T.Box3();ids.forEach(id=>{const i=indexById.get(id);if(i!==undefined)box.union(bounds[i]);});
+   const corner=new T.Vector3();for(const vertex of skinVertices)if(areas.some(w=>w.area===vertex.area&&sideFits(w.side,vertex.side)))box.expandByPoint(corner.set(vertex.x,vertex.y,vertex.z));
+   if(box.isEmpty())return;
    const center=box.getCenter(new T.Vector3()),size=box.getSize(new T.Vector3()),half=Math.tan(T.MathUtils.degToRad(camera.fov/2));
    const distance=T.MathUtils.clamp(Math.max(size.y/.4,size.x/.4/camera.aspect)/(2*half),fitDistance*.2,fitDistance);
    const direction=view==='back'?new T.Vector3(0,.02,-1):new T.Vector3(0,.02,1);
@@ -203,7 +223,8 @@ export default function AnatomyScene({atlas,state,onSelect,onProgress,onError}:P
    }
    if(s.reset!==lastReset||(s.view!==lastView&&!isZoomed())){fit(s.view,amount);lastView=s.view;lastReset=s.reset;}
    else if(s.view!==lastView){/* «لف» while zoomed in: the same place, seen from the other side */const offset=camera.position.clone().sub(controls.target).applyAxisAngle(new T.Vector3(0,1,0),Math.PI);camera.position.copy(controls.target).add(offset);settle();lastView=s.view;}
-   const highlightKey=(s.highlighted??[]).join(',');if(highlightKey!==lastHighlight){lastHighlight=highlightKey;if(highlightKey)frameHighlight(s.highlighted!,s.view);}
+   paintSkin(s);
+   const highlightKey=(s.highlighted??[]).join(',')+JSON.stringify(s.highlightedAreas??[])+':'+skinVertices.length;if(highlightKey!==lastHighlight){lastHighlight=highlightKey;if((s.highlighted??[]).length||(s.highlightedAreas??[]).length)frameHighlight(s.highlighted??[],s.highlightedAreas??[],s.view);}
    if(moving&&!s.isolate)fit(amount>.5?'front':s.view,Math.max(0,(amount-.3)/.7));
    const isolateKey=s.isolate?s.selected.join(',')+':'+s.reset+':'+s.inspectorOpen+':'+camera.aspect:'';
    if(isolateKey!==lastIsolate||(s.isolate&&moving)){
