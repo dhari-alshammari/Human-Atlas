@@ -5,6 +5,7 @@ import { RefreshCw, Maximize2, X } from 'lucide-react';
 import AnatomyScene from './scene';
 import { edition, type Atlas, type SceneState, type Sex, type SystemId } from './anatomy';
 import { parseSurface, surfaceName } from './body-surface';
+import TERMS_AR from './terms-ar.json';
 
 // Male or female (owner request 2026-11-22). The female model is a different reference body (HuBMAP female v1.10): it
 // has the skin, organs and female organs, its own spine, pelvis and knees, bones borrowed from the male model, and
@@ -110,6 +111,15 @@ const sideOfName = (name: string) => (/\bright\b/i.test(name) ? 'right' : /\blef
 // Bubble keeps sending one text field; `names` and `ids` list them too.
 const SEPARATOR = ' | ';
 
+// The selected part's name in Arabic for the chip above the chat box (owner request 2026-11-25): a simple name a patient
+// understands, «عضلة في الرقبة – الجهة اليمنى», not the Latin anatomy name. An organ, a bone or a part of the brain uses
+// its Arabic anatomical name when the model's dictionary has one («الرئة اليمنى»، «عظم الفخذ الأيسر»).
+const KIND_AR: Partial<Record<SystemId, string>> = {
+  muscular: 'عضلة', 'donor-muscle': 'عضلة', skeletal: 'عظمة', borrowed: 'عظمة', connective: 'وتر أو رباط', arterial: 'شريان',
+  venous: 'وريد', nervous: 'عصب', sensory: 'جزء من', integumentary: 'الجلد',
+};
+const ORGAN_SYSTEMS = new Set<string>(['cardiac', 'respiratory', 'digestive', 'urinary', 'endocrine', 'lymphatic', 'brain', 'reproductive', 'pregnancy']);
+
 export default function Home() {
   const [sex, setSex] = useState<Sex>('male');
   const [atlas, setAtlas] = useState<Atlas | null>(null);
@@ -175,6 +185,23 @@ export default function Home() {
     const surface = parseSurface(id);
     return surface ? surfaceName(surface.area, surface.side) : parts.get(id)?.name ?? '';
   };
+  const arabicNameOf = (id: string) => {
+    const labels = (regions as unknown as { labels?: Record<string, string> } | null)?.labels ?? {};
+    const surface = parseSurface(id);
+    const sideAr = (side: string | null) => (side === 'right' ? ' – الجهة اليمنى' : side === 'left' ? ' – الجهة اليسرى' : '');
+    if (surface) return `${labels[surface.area] ?? surface.area}${sideAr(surface.side)}`;
+    const part = parts.get(id);
+    if (!part) return '';
+    const known = (TERMS_AR as Record<string, string>)[part.name.toLowerCase().trim()];
+    const area = regions?.[sex]?.[id];
+    const place = area ? labels[area] : '';
+    const side = sideOfName(part.name);
+    if (known && (ORGAN_SYSTEMS.has(part.system) || part.system === 'skeletal' || !place)) return known;
+    const kind = KIND_AR[part.system as SystemId];
+    if (!place) return known ?? part.name;
+    if (part.system === 'nervous' && area === 'brain') return known ?? 'جزء من الدماغ';
+    return `${kind ? `${kind} ${kind === 'جزء من' ? '' : 'في '}` : ''}${place}${sideAr(side)}`.replace(/\s+/g, ' ').trim();
+  };
   const sendSelection = (ids: string[], tapped?: string) => {
     const chosen = ids.filter(id => nameOf(id));
     window.parent.postMessage(
@@ -183,6 +210,9 @@ export default function Home() {
         id: tapped ?? chosen.at(-1) ?? '',
         name: chosen.map(nameOf).join(SEPARATOR),
         names: chosen.map(nameOf),
+        // The same parts in simple Arabic for the chip above the chat box (2026-11-25); the doctor still gets `name`.
+        nameAr: chosen.map(arabicNameOf).join(SEPARATOR),
+        namesAr: chosen.map(arabicNameOf),
         ids: chosen,
         count: chosen.length,
         sex,
